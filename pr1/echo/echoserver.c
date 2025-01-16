@@ -8,8 +8,10 @@
 #include <getopt.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 
 #define BUFSIZE 1024
+#define MAX_MSG_LEN 16
 
 #define USAGE                                                        \
     "usage:\n"                                                         \
@@ -27,6 +29,7 @@ static struct option gLongOptions[] = {
     {NULL,            0,                      NULL,             0}
 };
 
+void *get_in_addr(struct sockaddr *sa);
 
 int main(int argc, char **argv) {
     int portno = 48593; /* port to listen on */
@@ -71,6 +74,8 @@ int main(int argc, char **argv) {
 
     int sockfd, newfd;
     int yes = 1;
+    socklen_t addrSize;
+    struct sockaddr_storage connectorsAddress; // connector's address information
 
 
     // We want to ensure the struct is zero'd out and empty
@@ -79,7 +84,11 @@ int main(int argc, char **argv) {
     hints.ai_socktype = SOCK_STREAM; // Since we want to make this a TCP socket
     hints.ai_flags = AI_PASSIVE; // Tells getaddrinfo() to assign local host to the socket structures
 
-    if ((status = getaddrinfo(NULL, portno, &hints, &servinfo)) != 0) {
+    char portNoStr[32];
+    memset(&portNoStr, 0, sizeof portNoStr);
+    sprintf(portNoStr, "%d", portno);
+
+    if ((status = getaddrinfo(NULL, portNoStr, &hints, &servinfo)) != 0) {
         // Send error to stderr and stop the program since ther's no point to continue if getaddrinfo fails
         fprintf(stderr, "getaddrinfo error: %s\n", gai_strerror(status));
         exit(1);
@@ -123,5 +132,48 @@ int main(int argc, char **argv) {
         exit(1);
     }
 
-    // Adding this to seee if it's trackerd
+    char msgBuff[MAX_MSG_LEN]; // This will contain our recieved message
+    int bytesRecvd;
+    
+    printf("server: waiting for connections...\n");
+    for(;;) {
+        addrSize = sizeof connectorsAddress;
+
+        // Attempt to connect with the connection (blocking call)
+        newfd = accept(sockfd, (struct sockaddr *)&connectorsAddress, &addrSize);
+        if (newfd == -1) {
+            perror("server: accept");
+            continue;
+        }
+        
+        printf("server: connected to client!\n");
+        memset(&msgBuff, 0, MAX_MSG_LEN);
+
+        // Let's read message sent to the socket from client (blocking call)
+        bytesRecvd = recv(newfd, &msgBuff, MAX_MSG_LEN, 0);
+
+        if (bytesRecvd == -1) {
+            perror("server: recv");
+            close(newfd);
+            continue;
+        } else if (bytesRecvd == 0) {
+            printf("server: client disconnected prematurely\n");
+            close(newfd);
+        }
+
+        printf("size recived: %d\n",bytesRecvd);
+
+        msgBuff[bytesRecvd] = '\0';
+        printf("server: msg %s\n", msgBuff);
+
+        // We need to reply back to the client with the message they sent
+        if (send(newfd, msgBuff, bytesRecvd, 0) == -1) {
+            perror("server: send");
+        }
+
+        close(newfd);
+    }
+
+    close(sockfd);
+    return 0;
 } 
