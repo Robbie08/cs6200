@@ -29,8 +29,6 @@ static struct option gLongOptions[] = {
     {NULL,            0,                      NULL,             0}
 };
 
-void *get_in_addr(struct sockaddr *sa);
-
 int main(int argc, char **argv) {
     int portno = 48593; /* port to listen on */
     int option_char;
@@ -68,35 +66,33 @@ int main(int argc, char **argv) {
     
     /* Socket Code Here */
     int status; // holds status that we use to check for errs
-    struct addrinfo hints;
-    struct addrinfo *servinfo; // points to the result
-    struct addrinfo *curr;
-
-    int sockfd, newfd;
-    int yes = 1;
-    socklen_t addrSize;
-    struct sockaddr_storage connectorsAddress; // connector's address information
-
+    struct addrinfo addrConfig;
+    struct addrinfo *adressesList; // points to the linked list containing the socket addresses resolved by getaddrinfo
 
     // We want to ensure the struct is zero'd out and empty
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_UNSPEC; // to allow both IPv4 and IPv6
-    hints.ai_socktype = SOCK_STREAM; // Since we want to make this a TCP socket
-    hints.ai_flags = AI_PASSIVE; // Tells getaddrinfo() to assign local host to the socket structures
+    memset(&addrConfig, 0, sizeof addrConfig);
+    addrConfig.ai_family = AF_UNSPEC; // to allow both IPv4 and IPv6
+    addrConfig.ai_socktype = SOCK_STREAM; // Since we want to make this a TCP socket
+    addrConfig.ai_flags = AI_PASSIVE; // Tells getaddrinfo() to assign local host to the socket structures
 
+    // convert from string 
     char portNoStr[32];
     memset(&portNoStr, 0, sizeof portNoStr);
     sprintf(portNoStr, "%d", portno);
 
-    if ((status = getaddrinfo(NULL, portNoStr, &hints, &servinfo)) != 0) {
+    if ((status = getaddrinfo(NULL, portNoStr, &addrConfig, &adressesList)) != 0) {
         // Send error to stderr and stop the program since ther's no point to continue if getaddrinfo fails
         fprintf(stderr, "getaddrinfo error: %s\n", gai_strerror(status));
         exit(1);
     }
 
-    // At this point the servinfo now points to the linked list of 1 or more struct addrinfos
+    // At this point the adressesList now points to the linked list of 1 or more struct addrinfos
     // Create socket and bind to the first result that the linked list has
-    for (curr = servinfo; curr != NULL; curr = curr->ai_next) {
+    struct addrinfo *curr;
+    int sockfd;
+    int yes = 1;
+
+    for (curr = adressesList; curr != NULL; curr = curr->ai_next) {
 
         // Attempt to create a socket until success
         if ((sockfd = socket(curr->ai_family, curr->ai_socktype, curr->ai_protocol)) == -1) {
@@ -119,8 +115,8 @@ int main(int argc, char **argv) {
         break; // if we made it this far then we've created a socket and associated it with a port number on our machine.
     }
 
-    // Once we're done with servinfo let's free up the linked list
-    freeaddrinfo(servinfo);
+    // Once we're done with adressesList let's free up the linked list
+    freeaddrinfo(adressesList);
 
     if (curr == NULL) {
         fprintf(stderr, "server: failed to bind\n");
@@ -132,16 +128,19 @@ int main(int argc, char **argv) {
         exit(1);
     }
 
+    int newConfd;
+    socklen_t addrSize;
+    struct sockaddr_storage connectorsAddress; // connector's address information
+
     char msgBuff[MAX_MSG_LEN]; // This will contain our recieved message
     int bytesRecvd;
-    
     printf("server: waiting for connections...\n");
     for(;;) {
         addrSize = sizeof connectorsAddress;
 
         // Attempt to connect with the connection (blocking call)
-        newfd = accept(sockfd, (struct sockaddr *)&connectorsAddress, &addrSize);
-        if (newfd == -1) {
+        newConfd = accept(sockfd, (struct sockaddr *)&connectorsAddress, &addrSize);
+        if (newConfd == -1) {
             perror("server: accept");
             continue;
         }
@@ -150,28 +149,32 @@ int main(int argc, char **argv) {
         memset(&msgBuff, 0, MAX_MSG_LEN);
 
         // Let's read message sent to the socket from client (blocking call)
-        bytesRecvd = recv(newfd, &msgBuff, MAX_MSG_LEN, 0);
+        bytesRecvd = recv(newConfd, &msgBuff, MAX_MSG_LEN, 0);
 
         if (bytesRecvd == -1) {
             perror("server: recv");
-            close(newfd);
+            close(newConfd);
             continue;
         } else if (bytesRecvd == 0) {
+            // If we get 0 then that means the connection was terminated by the client.
             printf("server: client disconnected prematurely\n");
-            close(newfd);
+            close(newConfd);
+            continue;
         }
 
         printf("size recived: %d\n",bytesRecvd);
-
-        msgBuff[bytesRecvd] = '\0';
+        if (bytesRecvd < MAX_MSG_LEN) {
+            msgBuff[bytesRecvd] = '\0';
+        }
+        
         printf("server: msg %s\n", msgBuff);
 
         // We need to reply back to the client with the message they sent
-        if (send(newfd, msgBuff, bytesRecvd, 0) == -1) {
+        if (send(newConfd, msgBuff, bytesRecvd, 0) == -1) {
             perror("server: send");
         }
 
-        close(newfd);
+        close(newConfd);
     }
 
     close(sockfd);
