@@ -11,6 +11,7 @@
 
 /* Be prepared accept a response of this length */
 #define BUFSIZE 1024
+#define MAX_MSG_SIZE 16
 
 #define USAGE                                                                       \
     "usage:\n"                                                                      \
@@ -77,5 +78,91 @@ int main(int argc, char **argv)
     }
 
     /* Socket Code Here */
+    struct addrinfo addressConfig;
+    
+    // Zero out and set up our address config
+    memset(&addressConfig, 0, sizeof addressConfig);
+    addressConfig.ai_family = AF_UNSPEC;
+    addressConfig.ai_socktype = SOCK_STREAM;
 
+    char portNoStr[32];
+    memset(&portNoStr, 0, sizeof portNoStr);
+    sprintf(portNoStr, "%d", portno);
+
+    int status;
+    struct addrinfo *addressesList;
+
+    status = getaddrinfo(hostname, portNoStr, &addressConfig, &addressesList);
+    if (status == -1) {
+        perror("client: getaddrinfo");
+        exit(1);
+    }
+
+    int sockfd;
+    int err; 
+    struct addrinfo *curr;
+
+    // iterate over linked list until we find a connection
+    for (curr = addressesList; curr != NULL; curr = curr->ai_next) {
+        sockfd = socket(curr->ai_family, curr->ai_socktype, curr->ai_protocol);
+        if (sockfd == -1){
+            perror("client: socket");
+            continue;
+        }
+
+        err = connect(sockfd, curr->ai_addr, curr->ai_addrlen);
+        if (err == -1) {
+            close(sockfd);
+            perror("client: connect");
+            continue;
+        }
+
+        break; // we've connected another machine through the socket
+    }
+
+    if (curr == NULL) {
+        fprintf(stderr, "client: failed to connect\n");
+        return 2;
+    }
+
+    freeaddrinfo(addressesList); // we don't need the linked list anymore, so let's free it up
+
+    // We can now start talking with our server
+    int msgLen = strlen(message);
+    int bytesSent = 0 , bytesRead = 0;
+    
+    // printf("client: msg sent - %s\n", message);
+
+    // Since we are setting the length as the msgLen, it's possible that it exceeds the max length allowed on the server
+    bytesSent = send(sockfd, message, msgLen, 0);
+    if (bytesSent == -1) {
+        perror("client: send");
+        close(sockfd);
+        exit(1);
+    }
+
+    char msgBuff[MAX_MSG_SIZE];
+    memset(&msgBuff, 0, sizeof msgBuff); // zero out the buffer to ensure we're clean
+
+    // read message from our socket connection
+    bytesRead = recv(sockfd, msgBuff, MAX_MSG_SIZE, 0);
+    if (bytesRead == -1) {
+        perror("client: recv");
+        close(sockfd);
+        exit(1);
+    } else if (bytesRead == 0) {
+        // When this happens that means the other machine on the other end closed the connection
+        perror("client: recv - server closed connection");
+        close(sockfd);
+        exit(1);
+    }
+
+    if (bytesRead < MAX_MSG_SIZE) {
+        msgBuff[bytesRead] = '\0';
+    }
+
+    printf("%s", msgBuff);
+
+    close(sockfd);
+    return 0;
 }

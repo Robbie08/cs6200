@@ -140,8 +140,8 @@ int main(int argc, char **argv) {
     struct sockaddr_storage connectorsAddress; // usng sockaddr_storage since its big enough to hold IPv4 and IPv6 addresses
 
     char msgBuff[MAX_MSG_LEN]; // This will contain our recieved message
-    int bytesRecvd;
-    int bytesSent;
+    int bytesRecvd = 0, bytesSent = 0;
+    
     // printf("server: waiting for connections...\n");
     for(;;) {
         addrSize = sizeof connectorsAddress;
