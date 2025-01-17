@@ -65,9 +65,7 @@ int main(int argc, char **argv) {
     }
     
     /* Socket Code Here */
-    int status; // holds status that we use to check for errs
     struct addrinfo addrConfig;
-    struct addrinfo *adressesList; // points to the linked list containing the socket addresses resolved by getaddrinfo
 
     // We want to ensure the struct is zero'd out and empty
     memset(&addrConfig, 0, sizeof addrConfig);
@@ -75,12 +73,16 @@ int main(int argc, char **argv) {
     addrConfig.ai_socktype = SOCK_STREAM; // Since we want to make this a TCP socket
     addrConfig.ai_flags = AI_PASSIVE; // Tells getaddrinfo() to assign local host to the socket structures
 
-    // convert from string 
+    // convert port that's an int to string 
     char portNoStr[32];
     memset(&portNoStr, 0, sizeof portNoStr);
     sprintf(portNoStr, "%d", portno);
 
-    if ((status = getaddrinfo(NULL, portNoStr, &addrConfig, &adressesList)) != 0) {
+    int status; // holds status that we use to check for errs
+    struct addrinfo *adressesList; // points to the linked list containing the socket addresses resolved by getaddrinfo
+
+    status = getaddrinfo(NULL, portNoStr, &addrConfig, &adressesList);
+    if (status != 0) {
         // Send error to stderr and stop the program since ther's no point to continue if getaddrinfo fails
         fprintf(stderr, "getaddrinfo error: %s\n", gai_strerror(status));
         exit(1);
@@ -91,22 +93,26 @@ int main(int argc, char **argv) {
     struct addrinfo *curr;
     int sockfd;
     int yes = 1;
+    int err = 0;
 
     for (curr = adressesList; curr != NULL; curr = curr->ai_next) {
 
         // Attempt to create a socket until success
-        if ((sockfd = socket(curr->ai_family, curr->ai_socktype, curr->ai_protocol)) == -1) {
+        sockfd = socket(curr->ai_family, curr->ai_socktype, curr->ai_protocol);
+        if (sockfd == -1) {
             perror("server: socket");
             continue;
         }
-
+        
+        err = setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
         // If our port is still in use then lets just force it by allowing our program to use reuse it
-        if(setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1) {
+        if(err == -1) {
             perror("server: setsockopt");
             exit(1); // No point in continuing if for some reason we can't reuse the port since subsequent code will fail
         }
-
-        if (bind(sockfd, curr->ai_addr, curr->ai_addrlen) == -1) {
+        
+        err = bind(sockfd, curr->ai_addr, curr->ai_addrlen);
+        if (err == -1) {
             close(sockfd);
             perror("server: bind");
             continue; // Just becuase this one failed to bind doesn't mean there isn't another one available
@@ -123,18 +129,20 @@ int main(int argc, char **argv) {
         exit(1);
     }
 
-    if (listen(sockfd, maxnpending) == -1) {
+    err = listen(sockfd, maxnpending);
+    if (err == -1) {
         perror("server: listen");
         exit(1);
     }
 
     int newConfd;
     socklen_t addrSize;
-    struct sockaddr_storage connectorsAddress; // connector's address information
+    struct sockaddr_storage connectorsAddress; // usng sockaddr_storage since its big enough to hold IPv4 and IPv6 addresses
 
     char msgBuff[MAX_MSG_LEN]; // This will contain our recieved message
     int bytesRecvd;
-    printf("server: waiting for connections...\n");
+    int bytesSent;
+    // printf("server: waiting for connections...\n");
     for(;;) {
         addrSize = sizeof connectorsAddress;
 
@@ -145,12 +153,11 @@ int main(int argc, char **argv) {
             continue;
         }
         
-        printf("server: connected to client!\n");
+        // printf("server: connected to client!\n");
         memset(&msgBuff, 0, MAX_MSG_LEN);
 
         // Let's read message sent to the socket from client (blocking call)
         bytesRecvd = recv(newConfd, &msgBuff, MAX_MSG_LEN, 0);
-
         if (bytesRecvd == -1) {
             perror("server: recv");
             close(newConfd);
@@ -162,15 +169,16 @@ int main(int argc, char **argv) {
             continue;
         }
 
-        printf("size recived: %d\n",bytesRecvd);
+        // printf("size recived: %d\n",bytesRecvd);
         if (bytesRecvd < MAX_MSG_LEN) {
             msgBuff[bytesRecvd] = '\0';
         }
         
-        printf("server: msg %s\n", msgBuff);
+        // printf("server: msg %s\n", msgBuff);
 
         // We need to reply back to the client with the message they sent
-        if (send(newConfd, msgBuff, bytesRecvd, 0) == -1) {
+        bytesSent = send(newConfd, msgBuff, bytesRecvd, 0);
+        if ( bytesSent == -1) {
             perror("server: send");
         }
 
