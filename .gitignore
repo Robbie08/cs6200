@@ -1,2 +1,5 @@
 echoserver
 echoclient
+transferserver
+transferclient
+*.txt
