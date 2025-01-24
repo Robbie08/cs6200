@@ -18,4 +18,7 @@
 #include <sys/signal.h>
 #include <netinet/in.h>
 
+#define REQ_PATH_MAX_LEN 1024
+#define MAX_PORT_DIGITS 6
+
  #endif // __GF_STUDENT_H__

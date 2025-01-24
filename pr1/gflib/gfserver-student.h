@@ -6,5 +6,6 @@
 
 #include "gf-student.h"
 #include "gfserver.h"
+#include <stdlib.h>
 
 #endif // __GF_SERVER_STUDENT_H__

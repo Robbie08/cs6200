@@ -1,1 +1,3 @@
 handler.c
+*.o
+gfserver_main
