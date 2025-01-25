@@ -18,7 +18,7 @@ struct gfserver_t {
 
 struct gfcontext_t {
     int connFd;                             // File descriptor for the connection
-    char reqPath[REQ_PATH_MAX_LEN];         // the path that the client requested
+    char request[REQ_MAX_LEN];              // the request made by client
     socklen_t addrSize;                     // The address size
     struct sockaddr_storage connAddress;    // The connection address
     size_t bytesSent;                       // This outlines the number of bytes sent
@@ -40,14 +40,110 @@ void gfs_abort(gfcontext_t **ctx){
     printf("Successfully destroyed context!\n");
 }
 
+const char* extractPath(const char* requestPath) {
+    char *pathStart = strchr(requestPath, ' ');
+    if (pathStart != NULL) {
+        pathStart = strchr(pathStart+1, ' '); // point to the next space which should be after GET
+    }
+
+    // at this point, I'm pointing to the space before the path
+    // so I just need to copy the path characters up until I find '\r'
+    pathStart++;
+    
+    char *pathEnd = strchr(pathStart, '\r'); // we know that our path ends when we encounter '\r'
+    static char extractedPath[FILE_PATH_MAX_LEN];
+    size_t pathLength = pathEnd - pathStart;  // Calculate path length
+
+    if (pathLength >= REQ_MAX_LEN) {
+        return NULL;  // Path too long
+    }
+
+    strncpy(extractedPath, pathStart, pathLength);
+    extractedPath[pathLength] = '\0';  // Null-terminate the extracted path
+    return extractedPath;
+
+}
+
+gfstatus_t validateRequest(const char *request) {
+    // If request is null then return invalid code
+    if (request == NULL) {
+        printf("Failed because request is NULL\n");
+        return GF_INVALID; // Verify that this error fits the requirements
+    }
+    
+    // Every request must have "GETFILE GET /", let's verify that
+    const char *prefix = "GETFILE GET";
+    int prefixLen = strlen(prefix);
+    if (strncmp(request, prefix, prefixLen) != 0) {
+        printf("Doesn't start with 'GETFILE GET /'\n");
+        return GF_INVALID;
+    }
+
+    if (strstr(request, "\r\n\r\n") == NULL){
+        printf("Didn't contain the '\r\n\r\n' suffix.\n");
+        return GF_INVALID;
+    }
+
+    // let's ensure that we only have 2 spaces in the request
+    const char *str = request;
+    int spaceCount = 0;
+    while((str = strchr(str, ' ')) != NULL) {
+        spaceCount++;
+        str++;
+    }
+
+    if (spaceCount != 2) {
+        printf("number of spaces is: '%d' but should be '2'\n", spaceCount);
+        return GF_INVALID;
+    }
+
+    // let's verify that the path starts with '/' and doesn't exceed the length of the max
+    char *pathStart = strchr(request, ' ');
+    if (pathStart != NULL) {
+        pathStart = strchr(pathStart+1, ' '); // point to the next space which should be after GET
+    }
+
+    if (pathStart == NULL || *(pathStart + 1) != '/' || strlen(pathStart + 1) >= REQ_MAX_LEN) {
+        return GF_INVALID;
+    }
+
+    return GF_OK;
+}
+
 ssize_t gfs_send(gfcontext_t **ctx, const void *data, size_t len){
     // not yet implemented
+    printf("sending file!\n");
     return -1;
 }
 
 ssize_t gfs_sendheader(gfcontext_t **ctx, gfstatus_t status, size_t file_len){
-    // not yet implemented
-    return -1;
+    if (ctx == NULL || *ctx == NULL) {
+        fprintf(stderr, "gfs_sendheader: Invalid context\n");
+        return -1;
+    }
+
+    char header[REQ_MAX_LEN];
+    memset(&header, 0, REQ_MAX_LEN);
+
+    if (status == GF_OK) {
+        snprintf(header, sizeof(header), "%s OK %zu\r\n\r\n", GETFILE, file_len);
+    } else if(status == GF_INVALID) {
+        snprintf(header, sizeof(header), "%s INVALID\r\n\r\n", GETFILE);
+    } else if(status == GF_ERROR) {
+        snprintf(header, sizeof(header), "%s ERROR\r\n\r\n", GETFILE);
+    } else if(status == GF_FILE_NOT_FOUND) {
+        snprintf(header, sizeof(header), "%s FILE_NOT_FOUND\r\n\r\n", GETFILE);
+    } 
+    
+    size_t headerLen = strlen(header);
+    ssize_t bytesSent;
+    bytesSent = send((*ctx)->connFd, header, headerLen, 0);
+    if (bytesSent == -1){
+        perror("server: send");
+        gfs_abort(ctx);
+    } 
+
+    return bytesSent;
 }
 
 gfcontext_t* context_create(){
@@ -139,11 +235,8 @@ void gfserver_serve(gfserver_t **gfs){
             continue;
         }
 
-        printf("Recieved request!\n");
-        
-        // read request
         int bytesRecv;
-        bytesRecv = recv(ctx->connFd, ctx->reqPath, REQ_PATH_MAX_LEN, 0);
+        bytesRecv = recv(ctx->connFd, ctx->request, REQ_MAX_LEN, 0);
         if (bytesRecv == -1) {
             perror("server: recv");
             gfs_abort(&ctx);
@@ -155,18 +248,25 @@ void gfserver_serve(gfserver_t **gfs){
             continue;
         }
 
-        // prep for sending file for now, let's just print hello world and terminate
-        if (bytesRecv < REQ_PATH_MAX_LEN) {
-            ctx->reqPath[bytesRecv] = '\0';
+        if (bytesRecv < REQ_MAX_LEN) {
+            ctx->request[bytesRecv] = '\0';
         }
 
-        printf("%s\n", ctx->reqPath);
-
-        int bytesSent = send(ctx->connFd, ctx->reqPath, bytesRecv, 0);
-        if (bytesSent == -1) {
-            perror("server: send");
+        gfstatus_t valid = validateRequest(ctx->request);
+        if (valid != GF_OK) {
+            gfs_sendheader(&ctx, valid, 0);
+            gfs_abort(&ctx);
+            continue;
         }
 
+        const char* extractedPath = extractPath(ctx->request);
+        printf("Extracted path: '%s'\n", extractedPath);
+
+        gfh_error_t status = gfs_handler(&ctx, extractedPath, (*gfs) -> handlerarg);
+        printf("handler returned status: %lu\n", status);
+        if (status != GF_OK){
+            gfs_sendheader(&ctx, status, 0);
+        }
         gfs_abort(&ctx);
     }
     

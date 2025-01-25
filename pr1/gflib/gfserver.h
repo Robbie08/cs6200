@@ -97,4 +97,15 @@ int createAndBindSocket(struct addrinfo *adressesList);
  */
 gfcontext_t* context_create();
 
+/**
+ * This function sanitizes the request and returns the valid status
+ */
+gfstatus_t validateRequest(const char *request);
+
+
+/**
+ * This function extracts the path from the request
+ */
+const char* extractPath(const char* requestPath);
+
 #endif
