@@ -202,11 +202,11 @@ void sendFileContents(int filefd, int connectionFd) {
             if (bytesSent == -1) {
                 perror("server: send");
                 close(connectionFd);
-                continue;
+                return;
             } else if (bytesSent == 0) {
                 perror("server: send failed because the client closed the connection.");
                 close(connectionFd);
-                continue;
+                return;
             }
             bytesToSend -= bytesSent; // subtract the bytes we sent from the total bytes we need to send
             bufPtr += bytesSent; // move our bufPtr to the start of next chunk

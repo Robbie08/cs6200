@@ -113,7 +113,26 @@ gfstatus_t validateRequest(const char *request) {
 ssize_t gfs_send(gfcontext_t **ctx, const void *data, size_t len){
     // not yet implemented
     printf("sending file!\n");
-    return -1;
+    const char *ptr = (const char *)data;
+    ssize_t bytesSent, totalBytesSent = 0;
+    ssize_t bytesToSend = len;
+    while(bytesToSend > 0) {
+        bytesSent = send((*ctx)->connFd, ptr, bytesToSend, 0);
+        if (bytesSent == -1) {
+            perror("server: send");
+            return -1;
+        } else if(bytesSent == 0) {
+            perror("server: send failed because the client closed the connection.");
+            return -1;
+        }
+
+        bytesToSend -= bytesSent;
+        ptr += bytesSent;
+        totalBytesSent += bytesSent;
+        (*ctx)->bytesSent += bytesSent;
+    }
+    
+    return totalBytesSent;
 }
 
 ssize_t gfs_sendheader(gfcontext_t **ctx, gfstatus_t status, size_t file_len){

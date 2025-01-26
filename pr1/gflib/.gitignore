@@ -1,3 +1,4 @@
 handler.c
 *.o
 gfserver_main
+courses/ud923/filecorpus/*
