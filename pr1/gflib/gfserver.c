@@ -1,4 +1,11 @@
 #include "gfserver-student.h"
+#include <stdlib.h>
+#include <netdb.h>
+
+#define REQ_MAX_LEN 1024
+#define FILE_PATH_MAX_LEN 1000
+#define MAX_PORT_DIGITS 6
+#define GETFILE "GETFILE"
 
 // Modify this file to implement the interface specified in
  // gfserver.h.
@@ -25,19 +32,40 @@ struct gfcontext_t {
     gfstatus_t responseCode;                // The response associated with the request
 };
 
+
+/*
+ * This function creates a socket and binds to the first valid address in the addressList (linked list).
+ * The socket's file descriptor is retured if the operation succeeded.
+ */
+int createAndBindSocket(struct addrinfo *adressesList);
+
+/*
+ * This function creates and initilizes the gfcontext_t object
+ */
+gfcontext_t* context_create();
+
+/**
+ * This function sanitizes the request and returns the valid status
+ */
+gfstatus_t validateRequest(const char *request);
+
+
+/**
+ * This function extracts the path from the request
+ */
+const char* extractPath(const char* requestPath);
+
 void gfs_abort(gfcontext_t **ctx){
     if (ctx == NULL || *ctx == NULL) {
         return;
     }
 
-    printf("Destorying context!\n");
     if ((*ctx) -> connFd != -1) {
         close((*ctx) -> connFd);
     }
 
     free(*ctx);
     *ctx = NULL;
-    printf("Successfully destroyed context!\n");
 }
 
 const char* extractPath(const char* requestPath) {
@@ -112,7 +140,6 @@ gfstatus_t validateRequest(const char *request) {
 
 ssize_t gfs_send(gfcontext_t **ctx, const void *data, size_t len){
     // not yet implemented
-    printf("sending file!\n");
     const char *ptr = (const char *)data;
     ssize_t bytesSent, totalBytesSent = 0;
     ssize_t bytesToSend = len;
@@ -168,7 +195,7 @@ ssize_t gfs_sendheader(gfcontext_t **ctx, gfstatus_t status, size_t file_len){
 gfcontext_t* context_create(){
     gfcontext_t* connectionConfig = malloc(sizeof(gfcontext_t));
     if (connectionConfig == NULL) {
-        perror("gfconnection_create: failed to allocate memory for the struct");
+        perror("context_create: failed to allocate memory for the struct");
         exit(1);
     }
 
@@ -245,7 +272,6 @@ void gfserver_serve(gfserver_t **gfs){
         exit(1);
     }
 
-    printf("Server is listening for connections!\n");
     for (;;) {
         gfcontext_t *ctx = context_create();
         ctx->connFd = accept((*gfs)->sockfd, (struct sockaddr *)&(ctx->connAddress), &(ctx->addrSize));
@@ -279,10 +305,8 @@ void gfserver_serve(gfserver_t **gfs){
         }
 
         const char* extractedPath = extractPath(ctx->request);
-        printf("Extracted path: '%s'\n", extractedPath);
 
         gfh_error_t status = gfs_handler(&ctx, extractedPath, (*gfs) -> handlerarg);
-        printf("handler returned status: %lu\n", status);
         if (status != GF_OK){
             gfs_sendheader(&ctx, status, 0);
         }
