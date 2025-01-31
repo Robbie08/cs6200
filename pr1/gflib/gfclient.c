@@ -37,7 +37,7 @@ void gfc_cleanup(gfcrequest_t **gfr) {
     return;
   }
 
-  // printf("Destorying gfcrequest_t object\n");
+  //// printf("Destorying gfcrequest_t object\n");
   if ((*gfr)->sockfd != -1) {
     close((*gfr)->sockfd);
   }
@@ -51,7 +51,7 @@ gfcrequest_t *gfc_create() {
   gfcrequest_t* config = malloc(sizeof(gfcrequest_t));
   if (config == NULL) {
     perror("gfc_create: failed to allocate memory for the gfcrequest_t object");
-    exit(1);
+    return NULL;
   }
 
   memset(config, 0, sizeof(gfcrequest_t));
@@ -59,6 +59,7 @@ gfcrequest_t *gfc_create() {
   config -> port = 0;
   config -> bytesRecvd = 0;
   config -> parsedHeader = 0;
+  config -> respStatus = GF_OK;
 
   memset(&config->response, 0, BUFSIZ);
 
@@ -114,16 +115,17 @@ int gfc_perform(gfcrequest_t **gfr) {
   memset(&portStr, 0, sizeof portStr);
   sprintf(portStr, "%d", (*gfr)->port);
 
-  int status;
+  int addrinfoStatus;
   struct addrinfo *addressesList;
-  status = getaddrinfo((*gfr)->server, portStr, &addrConfig, &addressesList);
-  if (status != 0) {
+  addrinfoStatus = getaddrinfo((*gfr)->server, portStr, &addrConfig, &addressesList);
+  if (addrinfoStatus != 0) {
       // Send error to stderr and stop the program since ther's no point to continue if getaddrinfo fails
-      fprintf(stderr, "getaddrinfo error: %s\n", gai_strerror(status));
-      exit(1);
+      fprintf(stderr, "getaddrinfo error: %s\n", gai_strerror(addrinfoStatus));
+      return -1;
   }
 
   (*gfr)->sockfd = createSocketAndConnect(addressesList);
+  freeaddrinfo(addressesList); // we don't need the linked list anymore, so let's free it up
   if ((*gfr)->sockfd == -1) {
     perror("client: createSocketAndConnect");
     return -1;
@@ -141,62 +143,87 @@ int gfc_perform(gfcrequest_t **gfr) {
   }
   
   ssize_t bytesRecvd;
+  size_t totalHeaderBytes = 0;
+  char headerBuff[BUFSIZ]; 
+  memset(&headerBuff, 0 , sizeof headerBuff);
+
   while((bytesRecvd = recv((*gfr)->sockfd, (*gfr)->response, BUFSIZ, 0)) > 0) {
-    // write the data received into the file. Of course, we don't want the header back
-    // so we need to parse the response, if OK status then we write the contents to the file
-    if (bytesRecvd < BUFSIZ) {
-        (*gfr)->response[bytesRecvd] = '\0';
+    if (totalHeaderBytes + bytesRecvd >= BUFSIZ) {
+      perror("client: header exceeds the BUFSIZE.");
+      (*gfr)->respStatus = GF_OK;
+      return 0;
     }
 
-    if ((*gfr)->parsedHeader == 0) {
-      
-      // Here is a valid generic response template:
-      // <scheme> <status> <length>\r\n\r\n<content>
-      // This method should parse the header and get a couple of things.
-      // 1. Store the response code in gfr
-      // 2. If the status is OK, store the file length in gfr
-      
-      parseResponseHeader(gfr, (*gfr)->response, bytesRecvd);
-      if ((*gfr)->respStatus != GF_OK) {
-        perror("client: response was a non 200 code");
-        return -1;
-      }
-      (*gfr)->parsedHeader = 1;
+    strncat(headerBuff, (*gfr)->response, bytesRecvd); // append the response to the headerBuff so that we can analyze
+    totalHeaderBytes += bytesRecvd;
 
-      // we need to move our ptr to the start of the content which is based on the
-      // generic response "<scheme> <status> <length>\r\n\r\n<content>"
-      // Based on this format, we know that the content starts after the "\r\n\r\n"
-      // and up until we don't get any more content.
-      char *contentStart = strstr((*gfr)->response, "\r\n\r\n");
-      if (contentStart == NULL) {
-        perror("client: missing content delimiter '\r\n\r\n'");
-        return -1;
-      }
-
-      contentStart += 4; // since there are 4 delimiting chars
-
-      // Subtract the header size from the bytes received so that we know how many bytes to write
-      size_t headerSize = contentStart - (*gfr)->response;
-      size_t contentBytes = bytesRecvd - headerSize;
-
-      // we can write our first chunk to disk
-      if (contentBytes > 0) {
-        (*gfr)->writefunc((void *)contentStart, contentBytes, (*gfr)->writearg);
-      }
-
-      (*gfr)->parsedHeader = 1; // ensures we don't come into this block again
-      (*gfr) -> bytesRecvd += contentBytes;
-      continue;
+    if (strstr(headerBuff, "\r\n\r\n") != NULL){
+      break; // if we received the delimeter then we have our header and can start parsing
     }
-    // Call write callback for subsequent chunks
-    (*gfr)->writefunc((void *)(*gfr)->response, bytesRecvd, (*gfr)->writearg);
-    (*gfr) -> bytesRecvd += bytesRecvd;
   }
 
+  // It's possible we got 0 or -1 before we transfered the entire header
   if (bytesRecvd == -1) {
-    perror("client: recv");
+    perror("client: recv got -1 indicating some issue with the transfer");
+    (*gfr)->respStatus = GF_INVALID;
+    return -1;
+  } else if (bytesRecvd == 0 && strstr(headerBuff, "\r\n\r\n") == NULL) {
+    perror("client: the server terminated the connection during transfer of the message header");
+    (*gfr)->respStatus = GF_INVALID;
     return -1;
   }
+
+  // printf("------- parsing header START--------\n");
+  gfstatus_t status = parseResponseHeader(gfr, (*gfr)->response, bytesRecvd);
+  // printf("------- parsing header DONE --------\n");
+  if (status == GF_INVALID) {
+    perror("client: issue with receiving the response from server.");
+    return -1;
+  } else if (status == GF_FILE_NOT_FOUND || status == GF_ERROR) {
+    return 0; // We should return 0 in these cases
+  }
+
+  char *contentStart = strstr(headerBuff, "\r\n\r\n");
+  // since there are 4 delimiting chars we need to move up 4 to get to the content
+  contentStart += 4; 
+  size_t headerSize = contentStart - headerBuff;
+  size_t contentBytes = totalHeaderBytes - headerSize;
+
+  // Process the first chunk of content
+  if (contentBytes > 0) {
+      (*gfr)->writefunc((void *)contentStart, contentBytes, (*gfr)->writearg);
+      (*gfr)->bytesRecvd += contentBytes;
+  }
+
+  // At this point all we need to do is get the actual content so we just keep looping until we get 0
+  while ((bytesRecvd = recv((*gfr)->sockfd, (*gfr)->response, BUFSIZ, 0)) > 0) {
+    (*gfr)->writefunc((void *)(*gfr)->response, bytesRecvd, (*gfr)->writearg);
+    (*gfr)->bytesRecvd += bytesRecvd;
+
+    if ((*gfr)->bytesRecvd >= (*gfr)->fileLen) {
+      break;  // Stop when file length is reached
+    }
+  }
+
+  // Validate any error scenarios from recv() like:
+  // 1) Got a generic issu with transfering data
+  // 2) Got a disconnect before sending all bytes
+  if (bytesRecvd == -1) {
+    perror("client: recv got -1 indicating some issue with the transfer");
+    (*gfr)->respStatus = GF_INVALID;
+    return -1;
+  } else if (bytesRecvd == 0) {
+    if((*gfr)->bytesRecvd != (*gfr)->fileLen) {
+      perror("client: the server terminated the connection during the transfer of message body");
+      (*gfr)->respStatus = status;
+      return -1;
+    } else {
+      (*gfr)->respStatus = GF_OK;
+    }
+  } 
+  // Ensure proper cleanup
+  close((*gfr)->sockfd);
+  (*gfr)->sockfd = -1;
 
   return 0;
 }
@@ -308,39 +335,41 @@ int createSocketAndConnect(struct addrinfo *addressesList) {
 
     if (curr == NULL) {
         perror("client: failed to connect");
-        freeaddrinfo(addressesList);
-        exit(2);
+        return -1;
     }
 
-    freeaddrinfo(addressesList); // we don't need the linked list anymore, so let's free it up
     return sockfd;
 }
 
-      // <scheme> <status> <length>\r\n\r\n<content>
-      // This method should parse the header and get a couple of things.
-      // 1. Store the response code in gfr
-      // 2. If the status is OK, store the file length in gfr
-void parseResponseHeader(gfcrequest_t **gfr, const char* response, ssize_t bytesRecvd) {
+// <scheme> <status> <length>\r\n\r\n<content>
+// This method should parse the header and get a couple of things.
+// 1. Store the response code in gfr
+// 2. If the status is OK, store the file length in gfr
+gfstatus_t parseResponseHeader(gfcrequest_t **gfr, const char* response, ssize_t bytesRecvd) {
   if (gfr == NULL || *gfr == NULL || response == NULL) {
     (*gfr) ->respStatus = GF_INVALID;
-    return;
+    return (*gfr)->respStatus;
   }
 
+ // printf("checking GETFILE is there\n");
   const char *prefix = "GETFILE";
   int prefixLen = strlen(prefix);
   if (strncmp(response, prefix, prefixLen) != 0) {
     perror("client: the server returned an incompatible response header");
     (*gfr)->respStatus = GF_INVALID;
-    return;
+    return (*gfr)->respStatus;
   }
 
+
+ // printf("checking delimiters are present\n");
   if (strstr(response, "\r\n\r\n") == NULL){
-      printf("Didn't contain the '\r\n\r\n' suffix.\n");
-      (*gfr)->respStatus = GF_INVALID;
-      return;
+    perror("client: response didn't contain the '\r\n\r\n' suffix.");
+    (*gfr)->respStatus = GF_INVALID;
+    return (*gfr)->respStatus;
   }
 
-  // let's ensure that we only have 2 spaces in the request
+  // let's ensure that we only have 2 spaces in the request since it's an OK status
+ // printf("Checking the number of spaces in the string");
   const char *str = response;
   int spaceCount = 0;
   while((str = strchr(str, ' ')) != NULL) {
@@ -348,51 +377,63 @@ void parseResponseHeader(gfcrequest_t **gfr, const char* response, ssize_t bytes
       str++;
   }
 
-  if (spaceCount != 2) {
-      printf("number of spaces is: '%d' but should be '2'\n", spaceCount);
-      (*gfr)->respStatus = GF_INVALID;
-      return;
+ // printf("The number of spaces is: %d\n", spaceCount);
+
+  if (spaceCount > 2 || spaceCount < 1) {
+    (*gfr) -> respStatus = GF_INVALID;
+    return (*gfr)->respStatus;
   }
 
 
+  // OK status header:    <scheme> <status> <length>\r\n\r\n<content>
+  // !OK sttatus header:  <scheme> <status>\r\n\r\n
+
+ // printf("Extracting the status\n");
   char *statusStart = strchr(response, ' '); // points to the first space which should be after the <scheme>
   char *statusEnd;
-  if(statusStart != NULL) {
+  if(statusStart != NULL && spaceCount == 2) {
     statusEnd = strchr(statusStart+1, ' '); // points to the next space which should be after the <status>
+  } else if (statusStart != NULL && spaceCount == 1) {
+    statusEnd = strchr(statusStart+1, '\r'); // points to the start of '\r\n\r\n'
   }
+  
   statusStart++; // move up to the first char of the status code
-
-  size_t statusLen = statusEnd - statusStart;
-
-  if (statusLen >= sizeof((*gfr)->respStatus)){
+  if (statusEnd == NULL) {
+    perror("client: statusEnd is NULL, invalid response format");
     (*gfr)->respStatus = GF_INVALID;
-    return;
+    return (*gfr)->respStatus;
   }
+  size_t statusLen = statusEnd - statusStart;
 
   char extractedStatus[16];
   memset(&extractedStatus, 0, sizeof(extractedStatus));
+
+ // printf("Ensuring that the statusLen of '%zu' doesn't exceede '%zu'\n", statusLen, sizeof extractedStatus);
+  if (statusLen >= sizeof extractedStatus){
+    (*gfr)->respStatus = GF_INVALID;
+    return (*gfr)->respStatus;
+  }
+
   strncpy(extractedStatus, statusStart, statusLen);
   extractedStatus[statusLen] = '\0';
+ // printf("status recv: '%s'\n", extractedStatus);
 
   // Map the status string to enum
   if (strcmp(extractedStatus, "OK") == 0) {
       (*gfr)->respStatus = GF_OK;
   } else if (strcmp(extractedStatus, "FILE_NOT_FOUND") == 0) {
       (*gfr)->respStatus = GF_FILE_NOT_FOUND;
+      return (*gfr)->respStatus;
   } else if (strcmp(extractedStatus, "ERROR") == 0) {
       (*gfr)->respStatus = GF_ERROR;
+      return (*gfr)->respStatus;
   } else {
       (*gfr)->respStatus = GF_INVALID;
-      return;
-  }
-
-  if ((*gfr)->respStatus != GF_OK) {
-    perror("client: response was a non 200 status code.");
-    return;
+      return (*gfr)->respStatus;
   }
 
   char *fileLenStart = statusEnd+1;
-  char *fileLenEnd = strchr(fileLenStart, '\r'); // This is the 
+  char *fileLenEnd = strchr(fileLenStart, '\r');
 
   // extract the length
   char extractedFileLen[32];
@@ -402,8 +443,16 @@ void parseResponseHeader(gfcrequest_t **gfr, const char* response, ssize_t bytes
 
   extractedFileLen[fileLenLength] = '\0';
 
+  if ((*gfr)->respStatus != GF_OK) {
+    (*gfr)->fileLen = 0;
+    return (*gfr)->respStatus;
+  }
+
+
   if (sscanf(extractedFileLen, "%zu", &(*gfr)->fileLen) != 1){
     (*gfr)->respStatus = GF_INVALID;
-    return;
+    return (*gfr)->respStatus;
   }
+
+  return (*gfr)->respStatus; 
 }
