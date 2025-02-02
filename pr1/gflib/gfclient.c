@@ -150,8 +150,8 @@ int gfc_perform(gfcrequest_t **gfr) {
   while((bytesRecvd = recv((*gfr)->sockfd, (*gfr)->response, BUFSIZ, 0)) > 0) {
     if (totalHeaderBytes + bytesRecvd >= BUFSIZ) {
       perror("client: header exceeds the BUFSIZE.");
-      (*gfr)->respStatus = GF_OK;
-      return 0;
+      (*gfr)->respStatus = GF_INVALID;
+      return -1;
     }
 
     strncat(headerBuff, (*gfr)->response, bytesRecvd); // append the response to the headerBuff so that we can analyze
@@ -174,7 +174,7 @@ int gfc_perform(gfcrequest_t **gfr) {
   }
 
   // printf("------- parsing header START--------\n");
-  gfstatus_t status = parseResponseHeader(gfr, (*gfr)->response, bytesRecvd);
+  gfstatus_t status = parseResponseHeader(gfr, (*gfr)->response, totalHeaderBytes);
   // printf("------- parsing header DONE --------\n");
   if (status == GF_INVALID) {
     perror("client: issue with receiving the response from server.");
