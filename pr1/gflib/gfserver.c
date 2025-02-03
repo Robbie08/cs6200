@@ -1,6 +1,4 @@
 #include "gfserver-student.h"
-#include <stdlib.h>
-#include <netdb.h>
 
 #define REQ_MAX_LEN 1024
 #define FILE_PATH_MAX_LEN 1000
@@ -22,7 +20,6 @@ struct gfserver_t {
     gfh_error_t (*handler)(gfcontext_t **ctx, const char *path, void* arg);
 };
 
-
 struct gfcontext_t {
     int connFd;                             // File descriptor for the connection
     char request[REQ_MAX_LEN];              // the request made by client
@@ -31,29 +28,6 @@ struct gfcontext_t {
     size_t bytesSent;                       // This outlines the number of bytes sent
     gfstatus_t responseCode;                // The response associated with the request
 };
-
-
-/*
- * This function creates a socket and binds to the first valid address in the addressList (linked list).
- * The socket's file descriptor is retured if the operation succeeded.
- */
-int createAndBindSocket(struct addrinfo *adressesList);
-
-/*
- * This function creates and initilizes the gfcontext_t object
- */
-gfcontext_t* context_create();
-
-/**
- * This function sanitizes the request and returns the valid status
- */
-gfstatus_t validateRequest(const char *request);
-
-
-/**
- * This function extracts the path from the request
- */
-const char* extractPath(const char* requestPath);
 
 void gfs_abort(gfcontext_t **ctx){
     if (ctx == NULL || *ctx == NULL) {
@@ -100,7 +74,7 @@ gfstatus_t validateRequest(const char *request) {
     }
     
     // Every request must have "GETFILE GET /", let's verify that
-    const char *prefix = "GETFILE GET";
+    const char *prefix = "GETFILE GET /";
     int prefixLen = strlen(prefix);
     if (strncmp(request, prefix, prefixLen) != 0) {
         printf("Doesn't start with 'GETFILE GET /'\n");
@@ -108,7 +82,7 @@ gfstatus_t validateRequest(const char *request) {
     }
 
     if (strstr(request, "\r\n\r\n") == NULL){
-        printf("Didn't contain the '\r\n\r\n' suffix.\n");
+        printf("Didn't contain the delimiter suffix.\n");
         return GF_INVALID;
     }
 
@@ -188,7 +162,6 @@ ssize_t gfs_sendheader(gfcontext_t **ctx, gfstatus_t status, size_t file_len){
         perror("server: send");
         gfs_abort(ctx);
     } 
-
     return bytesSent;
 }
 
@@ -196,12 +169,13 @@ gfcontext_t* context_create(){
     gfcontext_t* connectionConfig = malloc(sizeof(gfcontext_t));
     if (connectionConfig == NULL) {
         perror("context_create: failed to allocate memory for the struct");
-        exit(1);
+        return NULL;
     }
 
     memset(connectionConfig, 0, sizeof(gfcontext_t));
     connectionConfig -> connFd = -1; // to allow error detection during socket creation
     connectionConfig -> addrSize = sizeof(struct sockaddr_storage);
+    connectionConfig -> bytesSent = 0;
     
     return connectionConfig;
 }
@@ -210,7 +184,7 @@ gfserver_t* gfserver_create(){
     gfserver_t *serverConfig = malloc(sizeof(gfserver_t));
     if (serverConfig == NULL) {
         perror("gfserver_create: failed to allocate memory for the struct");
-        exit(1);
+        return NULL;
     }
 
     memset(serverConfig, 0, sizeof(gfserver_t));
@@ -228,7 +202,7 @@ gfserver_t* gfserver_create(){
 void gfserver_set_handler(gfserver_t **gfs, gfh_error_t (*handler)(gfcontext_t **, const char *, void*)){
     if(gfs == NULL || *gfs == NULL) {
         perror("gfserver_set_port: gfserver_t pointer is NULL");
-        exit(1);
+        return;
     }
     (*gfs)->handler = handler;
 }
@@ -236,7 +210,7 @@ void gfserver_set_handler(gfserver_t **gfs, gfh_error_t (*handler)(gfcontext_t *
 void gfserver_set_port(gfserver_t **gfs, unsigned short port){
     if(gfs == NULL || *gfs == NULL) {
         perror("gfserver_set_port: gfserver_t pointer is NULL");
-        exit(1);
+        return;
     }
     (*gfs)->port = port;
 }
@@ -258,18 +232,25 @@ void gfserver_serve(gfserver_t **gfs){
     if (status != 0) {
         // Send error to stderr and stop the program since ther's no point to continue if getaddrinfo fails
         fprintf(stderr, "getaddrinfo error: %s\n", gai_strerror(status));
-        exit(1);
+        return;
     }
 
     // Set and bind our server's file descriptor
     (*gfs) -> sockfd = createAndBindSocket(addressesList);
+    // Once we're done with adressesList let's free up the linked list
+    freeaddrinfo(addressesList);
+
+    if ((*gfs)->sockfd == -1) {
+        perror("server: createAndBindSocket");
+        return;
+    }
 
     int err = 0;
     err = listen((*gfs) -> sockfd, (*gfs) -> maxnpending);
     if (err == -1) {
         perror("server: listen");
         close((*gfs) -> sockfd);
-        exit(1);
+        return;
     }
 
     for (;;) {
@@ -277,10 +258,11 @@ void gfserver_serve(gfserver_t **gfs){
         ctx->connFd = accept((*gfs)->sockfd, (struct sockaddr *)&(ctx->connAddress), &(ctx->addrSize));
         if (ctx->connFd == -1) {
             perror("server: accept");
+            gfs_abort(&ctx);
             continue;
         }
 
-        int bytesRecv;
+        size_t bytesRecv;
         bytesRecv = recv(ctx->connFd, ctx->request, REQ_MAX_LEN, 0);
         if (bytesRecv == -1) {
             perror("server: recv");
@@ -295,7 +277,11 @@ void gfserver_serve(gfserver_t **gfs){
 
         if (bytesRecv < REQ_MAX_LEN) {
             ctx->request[bytesRecv] = '\0';
+        } else {
+            ctx->request[REQ_MAX_LEN-1] = '\0';
         }
+
+        printf("request: %s\n", ctx->request);
 
         gfstatus_t valid = validateRequest(ctx->request);
         if (valid != GF_OK) {
@@ -318,7 +304,7 @@ void gfserver_serve(gfserver_t **gfs){
 void gfserver_set_handlerarg(gfserver_t **gfs, void* arg){
     if(gfs == NULL || *gfs == NULL) {
         perror("gfserver_set_port: gfserver_t pointer is NULL");
-        exit(1);
+        return;
     }
     (*gfs)->handlerarg = arg;
 }
@@ -326,7 +312,7 @@ void gfserver_set_handlerarg(gfserver_t **gfs, void* arg){
 void gfserver_set_maxpending(gfserver_t **gfs, int max_npending){
     if(gfs == NULL || *gfs == NULL) {
         perror("gfserver_set_port: gfserver_t pointer is NULL");
-        exit(1);
+        return;
     }
     (*gfs)->maxnpending = max_npending;
 }
@@ -335,7 +321,7 @@ void gfserver_set_maxpending(gfserver_t **gfs, int max_npending){
 // This function creates a socket and binds to the first valid address in the addressList (linked list).
 // The socket's file descriptor is retured if the operation succeeded.
 int createAndBindSocket(struct addrinfo *adressesList) {
-    int sockfd;
+    int sockfd = -1;
     struct addrinfo *curr;
     int yes = 1;
     int err;
@@ -352,7 +338,8 @@ int createAndBindSocket(struct addrinfo *adressesList) {
         // If our port is still in use then lets just force it by allowing our program to use reuse it
         if(err == -1) {
             perror("server: setsockopt");
-            exit(1); // No point in continuing if for some reason we can't reuse the port since subsequent code will fail
+            close(sockfd);
+            return -1; // No point in continuing if for some reason we can't reuse the port since subsequent code will fail
         }
         
         err = bind(sockfd, curr->ai_addr, curr->ai_addrlen);
@@ -365,13 +352,10 @@ int createAndBindSocket(struct addrinfo *adressesList) {
         break; // if we made it this far then we've created a socket and associated it with a port number on our machine.
     }
 
-    // Once we're done with adressesList let's free up the linked list
-    freeaddrinfo(adressesList);
-
     if (curr == NULL) {
         fprintf(stderr, "server: failed to bind");
         close(sockfd);
-        exit(1);
+        return -1;
     }
 
     return sockfd;

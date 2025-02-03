@@ -2,3 +2,6 @@ handler.c
 *.o
 gfserver_main
 courses/ud923/filecorpus/*
+*settings.json
+gfclient_download
+gfclient_part1*

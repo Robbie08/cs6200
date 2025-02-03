@@ -86,26 +86,4 @@ void gfs_abort(gfcontext_t **ctx);
  */
 gfh_error_t gfs_handler(gfcontext_t **ctx, const char *path, void* arg);
 
-/*
- * This function creates a socket and binds to the first valid address in the addressList (linked list).
- * The socket's file descriptor is retured if the operation succeeded.
- */
-int createAndBindSocket(struct addrinfo *adressesList);
-
-/*
- * This function creates and initilizes the gfcontext_t object
- */
-gfcontext_t* context_create();
-
-/**
- * This function sanitizes the request and returns the valid status
- */
-gfstatus_t validateRequest(const char *request);
-
-
-/**
- * This function extracts the path from the request
- */
-const char* extractPath(const char* requestPath);
-
 #endif
