@@ -1,9 +1,11 @@
 #include "gfserver-student.h"
 
-#define REQ_MAX_LEN 1024
-#define FILE_PATH_MAX_LEN 1000
+#define REQ_MAX_LEN 4113 // GETFILE GET <path>\r\n\r\n\0 = 7+1+3+1+4096+4+1 = 4113 bytes
+#define FILE_PATH_MAX_LEN 4096 // max length in a linux file system is 4096 bytes
 #define MAX_PORT_DIGITS 6
 #define GETFILE "GETFILE"
+#define TIMEOUT_SEC 5
+#define TIMEOUT_MILI 0
 
 // Modify this file to implement the interface specified in
  // gfserver.h.
@@ -25,6 +27,7 @@ struct gfcontext_t {
     char request[REQ_MAX_LEN];              // the request made by client
     socklen_t addrSize;                     // The address size
     struct sockaddr_storage connAddress;    // The connection address
+    size_t bytesRecvd;                      // This outlines the total number of bytes received 
     size_t bytesSent;                       // This outlines the number of bytes sent
     gfstatus_t responseCode;                // The response associated with the request
 };
@@ -69,7 +72,7 @@ const char* extractPath(const char* requestPath) {
 gfstatus_t validateRequest(const char *request) {
     // If request is null then return invalid code
     if (request == NULL) {
-        printf("Failed because request is NULL\n");
+        perror("Failed because request is NULL");
         return GF_INVALID; // Verify that this error fits the requirements
     }
     
@@ -77,12 +80,12 @@ gfstatus_t validateRequest(const char *request) {
     const char *prefix = "GETFILE GET /";
     int prefixLen = strlen(prefix);
     if (strncmp(request, prefix, prefixLen) != 0) {
-        printf("Doesn't start with 'GETFILE GET /'\n");
+        perror("Doesn't start with 'GETFILE GET /'\n");
         return GF_INVALID;
     }
 
     if (strstr(request, "\r\n\r\n") == NULL){
-        printf("Didn't contain the delimiter suffix.\n");
+        perror("Didn't contain the delimiter suffix.\n");
         return GF_INVALID;
     }
 
@@ -95,7 +98,7 @@ gfstatus_t validateRequest(const char *request) {
     }
 
     if (spaceCount != 2) {
-        printf("number of spaces is: '%d' but should be '2'\n", spaceCount);
+        fprintf(stderr, "number of spaces is: '%d' but should be '2'\n", spaceCount);
         return GF_INVALID;
     }
 
@@ -176,6 +179,7 @@ gfcontext_t* context_create(){
     connectionConfig -> connFd = -1; // to allow error detection during socket creation
     connectionConfig -> addrSize = sizeof(struct sockaddr_storage);
     connectionConfig -> bytesSent = 0;
+    connectionConfig -> bytesRecvd = 0;
     
     return connectionConfig;
 }
@@ -258,19 +262,30 @@ void gfserver_serve(gfserver_t **gfs){
         ctx->connFd = accept((*gfs)->sockfd, (struct sockaddr *)&(ctx->connAddress), &(ctx->addrSize));
         if (ctx->connFd == -1) {
             perror("server: accept");
+            gfs_sendheader(&ctx, GF_ERROR, 0);
             gfs_abort(&ctx);
             continue;
         }
 
-        size_t bytesRecv;
-        bytesRecv = recv(ctx->connFd, ctx->request, REQ_MAX_LEN, 0);
-        if (bytesRecv == -1) {
-            perror("server: recv");
+        // Resource on how to create a timeout for recv during client connection: https://linux.die.net/man/3/setsockopt
+        // Resource for defining the timeval struct: https://linux.die.net/man/3/timercmp
+        struct timeval timeout;
+        timeout.tv_sec = TIMEOUT_SEC; 
+        timeout.tv_usec = TIMEOUT_MILI;
+
+        // Let's set the socket option so that it timeouts after X seconds to avoid hanging connections
+        if (setsockopt(ctx->connFd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+            perror("server: setsockopt (SO_RCVTIMEO) failed");
+            gfs_sendheader(&ctx, GF_ERROR, 0);
             gfs_abort(&ctx);
             continue;
-        } else if (bytesRecv == 0) {
-            // If we get 0 then that means the connection was terminated by the client.
-            printf("server: client disconnected prematurely\n");
+        }
+
+        size_t bytesRecv;        
+        bytesRecv = recvHeader(ctx);
+        if (bytesRecv <= 0) {
+            perror("server: recvHeader");
+            gfs_sendheader(&ctx, GF_INVALID, 0);
             gfs_abort(&ctx);
             continue;
         }
@@ -281,8 +296,6 @@ void gfserver_serve(gfserver_t **gfs){
             ctx->request[REQ_MAX_LEN-1] = '\0';
         }
 
-        printf("request: %s\n", ctx->request);
-
         gfstatus_t valid = validateRequest(ctx->request);
         if (valid != GF_OK) {
             gfs_sendheader(&ctx, valid, 0);
@@ -291,8 +304,8 @@ void gfserver_serve(gfserver_t **gfs){
         }
 
         const char* extractedPath = extractPath(ctx->request);
-
-        gfh_error_t status = gfs_handler(&ctx, extractedPath, (*gfs) -> handlerarg);
+        
+        gfh_error_t status = (*gfs)->handler(&ctx, extractedPath, (*gfs) -> handlerarg);
         if (status != GF_OK){
             gfs_sendheader(&ctx, status, 0);
         }
@@ -359,4 +372,45 @@ int createAndBindSocket(struct addrinfo *adressesList) {
     }
 
     return sockfd;
+}
+
+size_t recvHeader(gfcontext_t *ctx) {
+
+    char headerBuf[REQ_MAX_LEN];
+    memset(&headerBuf, 0, sizeof headerBuf);
+
+    size_t bytesRecv;
+    for(;;) {
+
+        bytesRecv = recv(ctx->connFd, headerBuf, REQ_MAX_LEN, 0);
+
+        if (bytesRecv == 0) {
+            // If we get 0 then that means the connection was terminated by the client.
+            perror("server: client disconnected prematurely");
+            ctx->responseCode = GF_INVALID;
+            return -1;
+        } else if (bytesRecv == -1) {
+            if (errno == EWOULDBLOCK) {
+                perror("server: recv timed out while waiting for entire header");
+            } else {
+                perror("server: recv");
+            }
+            ctx->responseCode = GF_INVALID;
+            return -1;
+        }
+
+        if (ctx->bytesRecvd + bytesRecv >= REQ_MAX_LEN-1) {
+            perror("server: client sent a larger header than expected");
+            return -1;
+        }
+
+        strncat(ctx->request, headerBuf, bytesRecv);
+        ctx->bytesRecvd += bytesRecv;
+
+        if(strstr(ctx->request, "\r\n\r\n") != NULL) {
+            break;
+        }
+    }
+        
+    return ctx->bytesRecvd;
 }

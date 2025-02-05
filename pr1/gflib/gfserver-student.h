@@ -31,4 +31,11 @@ gfstatus_t validateRequest(const char *request);
  */
 const char* extractPath(const char* requestPath);
 
+/**
+ * This function receives the entire header even if the header is partitioned into
+ * multiple network transactions. A timeout is applied to the recv function to 
+ * avoid deadlocks.
+ */
+size_t recvHeader(gfcontext_t *ctx);
+
 #endif // __GF_SERVER_STUDENT_H__
