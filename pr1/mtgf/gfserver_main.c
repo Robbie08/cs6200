@@ -93,6 +93,14 @@ int main(int argc, char **argv) {
   content_init(content_map);
 
   /* Initialize thread management */
+  int err;
+  err = init_delegate_pool(nthreads);
+  if (err != 0) {
+    perror("server: failed to initialize the delegate pool");
+    exit(1);
+  }
+  
+  init_threads(nthreads);
 
   /*Initializing server*/
   gfs = gfserver_create();
