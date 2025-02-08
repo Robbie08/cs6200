@@ -25,7 +25,6 @@ typedef struct {
 typedef struct {
     gfcontext_t *ctx;   // The ctx is the context passed by the Delegator
     char *path;         // The path is the path being retrieved
-    void *arg;          // The arg provided by the handler
 } request_t;
 
 
@@ -42,13 +41,13 @@ int init_delegate_pool(size_t numOfDelegates);
  * This function handles the delegate's work. Each delegate in the pool 
  * will have the same task. 
  */
-void delegate_function(void *args);
+void* delegate_function(void *args);
 
 /**
  * This method allows us to create the request which acts as a wrapper
  * object for our context and path.
  */
-request_t create_request(gfcontext_t **ctx, char *path, void *arg);
+request_t* create_request(gfcontext_t **ctx, const char *path);
 
 /**
  * This method will allow us to free up the space created for the request

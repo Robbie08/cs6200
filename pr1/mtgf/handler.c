@@ -2,11 +2,13 @@
 #include "gfserver.h"
 #include "workload.h"
 #include "content.h"
+#include <stdlib.h>
 
 gfserver_delegate_pool_t delegate_pool;
 
 
-request_t* create_request(gfcontext_t **ctx, char *path, void *arg) {
+request_t* create_request(gfcontext_t **ctx, const char *path) {
+	printf("boss: Attempting to create request object...\n");
 	request_t *request = malloc(sizeof(request_t));
 	if (request == NULL) {
 		perror("server: failed to allocate memory for the request_t");
@@ -14,7 +16,6 @@ request_t* create_request(gfcontext_t **ctx, char *path, void *arg) {
 	}
 
 	request->ctx = *ctx;
-	request->arg = arg;
 
 	// this ensures we keep the exact copy that we received
 	// since it's possible that this address itself can get
@@ -27,10 +28,12 @@ request_t* create_request(gfcontext_t **ctx, char *path, void *arg) {
 		return NULL;
 	} 
 
+	printf("boss: Handler successfully created request\n");
 	return request;
 }
 
 void destory_request(request_t *request) {
+	printf("Attempting to destroy request...\n");
 	if (request == NULL) {
 		return;
 	}
@@ -39,6 +42,7 @@ void destory_request(request_t *request) {
 		free(request->path);
 	}
 	free(request);
+	printf("Successfully destroyed request!\n");
 }
 
 //
@@ -51,7 +55,8 @@ void destory_request(request_t *request) {
 //        not in others.
 //
 gfh_error_t gfs_handler(gfcontext_t **ctx, const char *path, void* arg){
-
+	pthread_mutex_lock(&delegate_pool.q_lock);
+	printf("boss: Request received. Adding to the delegate pool.\n");
 	if (ctx == NULL || *ctx == NULL) {
 		perror("server: ctx is NULL in the gfs_handler");
 		return GF_ERROR; // Maybe look into if we should have this be INVALID?
@@ -62,7 +67,7 @@ gfh_error_t gfs_handler(gfcontext_t **ctx, const char *path, void* arg){
 		return GF_ERROR;
 	}
 
-	request_t *request = create_request(ctx, path, arg);
+	request_t *request = create_request(ctx, path);
 	if (request == NULL) {
 		perror("server: failed to create a request wrapper");
 		return GF_ERROR;
@@ -74,26 +79,48 @@ gfh_error_t gfs_handler(gfcontext_t **ctx, const char *path, void* arg){
 	// 	send_signal(pool.queue_is_not_empty); // let's delegates that there are tasks
 	// 	unlock(pool.m)
 
-	pthread_mutex_lock(&delegate_pool.q_lock);
+	
+	printf("boss: Adding request to queue.\n");
 	steque_enqueue(&delegate_pool.request_q, request);
+
+	printf("boss: Sending conditional signal.\n");
 	pthread_cond_signal(&delegate_pool.q_not_empty);
 	pthread_mutex_unlock(&delegate_pool.q_lock);
 
+	*ctx = NULL; // This is required to avoid dangling pointer from getting reassigned or accessed
+	printf("boss: Successfully delegated the work.\n");
 	return GF_OK;
 }
 
-void delegate_function(void *args){
+void* delegate_function(void *args){
+	printf("Thread starting up delegate function.\n");
 	for (;;) {
 		pthread_mutex_lock(&delegate_pool.q_lock); // Get the mutex so that we can safely add ourselves to the waiting queue
 
 		while(steque_isempty(&delegate_pool.request_q)) {
 			// we need to wait in the wait queue and release the queue lock
+			printf("Thread adding itself to the worker queue and releasing lock.\n");
 			pthread_cond_wait(&delegate_pool.q_not_empty, &delegate_pool.q_lock);
 		}
 
+		printf("Thread woke up and picking up request from queue.\n");
 		request_t *request = (request_t *) steque_pop(&delegate_pool.request_q);
 		pthread_mutex_unlock(&delegate_pool.q_lock); // unlock the mutex so that others can continue their flow
 
+		if (request->ctx == NULL) {
+            printf("Warning: ctx is NULL. It may have been freed by gfserver.c.\n");
+            destory_request(request);
+            continue;
+        }
+
+		size_t path_len = strlen(request->path);
+		char *tempPath = malloc(path_len+1); // allocates enough space to add '\0'
+		if (tempPath != NULL) {
+			memcpy(tempPath, request->path, path_len);
+			tempPath[path_len] = '\0';
+			printf("Fetching the file descriptor for path: '%s'.\n", tempPath);
+			free(tempPath);
+		}
 
 		// I'm not sure if the content_get() is thread safe,
 		// so I'm including a lock just to be safe
@@ -103,35 +130,29 @@ void delegate_function(void *args){
 
 		if (fd == -1) {
 			perror("server: failed to get file descriptor for the path requested");
-			gfs_sendheader(request->ctx, GF_ERROR, 0);
-			gfs_abort(&request->ctx);
-			destory_request(&request);
+			gfs_sendheader(&request->ctx, GF_ERROR, 0);
+			destory_request(request);
 			continue;
 		}
-
 		struct stat f_stats;
 		int err = fstat(fd, &f_stats);
 		if (err == -1) {
 			perror("server: failed to fstat the file descriptor");
-			gfs_sendheader(request->ctx, GF_ERROR, 0);
-			close(fd);
-			gfs_abort(&request->ctx);
-			destory_request(&request);
+			gfs_sendheader(&request->ctx, GF_ERROR, 0);
+			destory_request(request);
 			continue;
 		}
 
 		size_t fileSize = f_stats.st_size;
-		gfs_sendheader(request->ctx, GF_OK, fileSize);
-		int err = sendFileContents(request, fd);
+		gfs_sendheader(&request->ctx, GF_OK, fileSize);
+		err = sendFileContents(request, fd);
 		if (err == -1) {
 			perror("server: failed to sendFileContents");
 		}
 
-		close(fd);
-		gfs_abort(&request->ctx);
-		destory_request(&request);
+		destory_request(request);
 	}
-	return;
+	return NULL;
 }
 
 int init_delegate_pool(size_t numOfDelegates) {
@@ -156,6 +177,9 @@ int init_delegate_pool(size_t numOfDelegates) {
 		return -1;
 	}
 	delegate_pool.pool_size = numOfDelegates;
+
+	printf("successfully initialized delegate pool\n");
+	return 0;
 }
 
 void init_threads(size_t numthreads) {
@@ -167,12 +191,13 @@ void init_threads(size_t numthreads) {
 			perror("server: pthread_create failed to create delegate thread");
 			return;
 		}
+		printf("created thread '%d' of '%ld'\n", i+1, numthreads);
 	}
 }
 
 
 void cleanup_threads() {
-	steque_destroy(&delegate_pool.delegate_pool);
+	steque_destroy(&(delegate_pool.request_q));
 	pthread_mutex_destroy(&delegate_pool.q_lock);
 	pthread_mutex_destroy(&delegate_pool.file_lock);
 	pthread_cond_destroy(&delegate_pool.q_not_empty);
@@ -183,14 +208,21 @@ void cleanup_threads() {
 // connection's file descriptor in chunks. It's possible we cannot fit all the contents of the file
 // in one network transaction so we need keep sending chunks until we've sent all the file's contents.
 int sendFileContents(request_t *request, int filefd) {
+	printf("Attempting to send file conents to the client.\n");
     char buff[CHUNK_SIZE];
     memset(&buff, 0, CHUNK_SIZE);
+	off_t offset = 0; 
     ssize_t bytesRead, bytesSent;
-    while ((bytesRead = read(filefd, buff, sizeof(buff))) > 0) {
+    while ((bytesRead = pread(filefd, buff, sizeof(buff), offset)) > 0) {
         char *bufPtr = buff; // Allows me to keep track of the next chunk of bytes I need to send
         ssize_t bytesToSend = bytesRead;
         while(bytesToSend > 0) {
-            bytesSent = gfs_send(request->ctx, bufPtr, bytesToSend);
+			if (request->ctx == NULL) {
+				printf("Warning: ctx is NULL. It may have been freed by gfserver.c.\n");
+				destory_request(request);
+				continue;
+			}
+            bytesSent = gfs_send(&request->ctx, bufPtr, bytesToSend);
             if (bytesSent == -1) {
                 perror("server: send");
                 return -1;
@@ -201,11 +233,13 @@ int sendFileContents(request_t *request, int filefd) {
             bytesToSend -= bytesSent; // subtract the bytes we sent from the total bytes we need to send
             bufPtr += bytesSent; // move our bufPtr to the start of next chunk
         }
+		offset += bytesRead; // update the offset for next read
     }
 
     if (bytesRead == -1) {
         perror("server: send");
 		return -1;
     }
+	printf("Successfully sent all the file contents\n");
 	return 0;
 }
