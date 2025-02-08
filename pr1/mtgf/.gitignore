@@ -1,0 +1,4 @@
+courses/ud923/filecorpus/*
+*.o
+gfclient_download
+gfserver_main
