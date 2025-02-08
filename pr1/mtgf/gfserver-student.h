@@ -13,15 +13,26 @@
 #define MAX_DELEGATES 64
 #define CHUNK_SIZE 4096
 
+/**
+ * This Global Data Structure defines all the necessary data structures
+ * That our Delegator and Delegates need to concurrently perform
+ * their work.
+ */
 typedef struct {
-    size_t pool_size;
-    pthread_t delegate_pool[MAX_DELEGATES];
-    steque_t request_q;
-    pthread_mutex_t q_lock;
-    pthread_mutex_t file_lock;
-    pthread_cond_t q_not_empty;
+    size_t pool_size;                           // This keeps track of the pool size
+    pthread_t delegate_pool[MAX_DELEGATES];     // This data structure contains our delegates in the pool
+    steque_t request_q;                         // This queue contains the requests published by the Delegator
+    pthread_mutex_t q_lock;                     // This is the lock for our queue
+    pthread_cond_t q_not_empty;                 // This signal is to communicate between Delegator and Delegate when queue is not empty
 } gfserver_delegate_pool_t;
 
+
+/**
+ * This struct acts as a wrapper that contains the necessary objects
+ * for the delegate to perform the work. In short, the Delegator will
+ * publish request_t objects to the work queue and Delegates will
+ * consume those request.
+ */
 typedef struct {
     gfcontext_t *ctx;   // The ctx is the context passed by the Delegator
     char *path;         // The path is the path being retrieved
