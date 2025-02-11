@@ -18,4 +18,4 @@
 #include <netinet/in.h>
 #include <sys/signal.h>
 
- #endif // __GF_STUDENT_H__
+#endif // __GF_STUDENT_H__
