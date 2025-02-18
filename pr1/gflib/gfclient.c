@@ -148,12 +148,6 @@ int gfc_perform(gfcrequest_t **gfr) {
   memset(&headerBuff, 0 , sizeof headerBuff);
 
   while((bytesRecvd = recv((*gfr)->sockfd, (*gfr)->response, BUFSIZ, 0)) > 0) {
-    if (totalHeaderBytes + bytesRecvd >= BUFSIZ) {
-      perror("client: header exceeds the BUFSIZE.");
-      (*gfr)->respStatus = GF_INVALID;
-      return -1;
-    }
-
     strncat(headerBuff, (*gfr)->response, bytesRecvd); // append the response to the headerBuff so that we can analyze
     totalHeaderBytes += bytesRecvd;
 
@@ -166,10 +160,12 @@ int gfc_perform(gfcrequest_t **gfr) {
   if (bytesRecvd == -1) {
     perror("client: recv got -1 indicating some issue with the transfer");
     (*gfr)->respStatus = GF_INVALID;
+    close((*gfr)->sockfd);
     return -1;
   } else if (bytesRecvd == 0 && strstr(headerBuff, "\r\n\r\n") == NULL) {
     perror("client: the server terminated the connection during transfer of the message header");
     (*gfr)->respStatus = GF_INVALID;
+    close((*gfr)->sockfd);
     return -1;
   }
 
@@ -178,6 +174,7 @@ int gfc_perform(gfcrequest_t **gfr) {
   // printf("------- parsing header DONE --------\n");
   if (status == GF_INVALID) {
     perror("client: issue with receiving the response from server.");
+    close((*gfr)->sockfd);
     return -1;
   } else if (status == GF_FILE_NOT_FOUND || status == GF_ERROR) {
     return 0; // We should return 0 in these cases
@@ -211,11 +208,13 @@ int gfc_perform(gfcrequest_t **gfr) {
   if (bytesRecvd == -1) {
     perror("client: recv got -1 indicating some issue with the transfer");
     (*gfr)->respStatus = GF_INVALID;
+    close((*gfr)->sockfd);
     return -1;
   } else if (bytesRecvd == 0) {
     if((*gfr)->bytesRecvd != (*gfr)->fileLen) {
       perror("client: the server terminated the connection during the transfer of message body");
       (*gfr)->respStatus = status;
+      close((*gfr)->sockfd);
       return -1;
     } else {
       (*gfr)->respStatus = GF_OK;

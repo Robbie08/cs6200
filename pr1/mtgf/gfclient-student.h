@@ -76,6 +76,9 @@ int init_delegate_pool(size_t numOfDelegates);
 /**
  * This function creates the delegate threads and adds them to
  * the delegate pool.
+ * 
+ * I found this resource pretty useful for this function:
+ * https://hpc-tutorials.llnl.gov/posix/joining_and_detaching/
  */
 int init_threads(size_t numthreads);
 
@@ -92,7 +95,9 @@ int init_delegate_tracker();
 void* delegate_function(void *arg);
 
 /**
- * This function cleans up our threads
+ * This function cleans up our threads.
+ * I found this resource pretty useful for this function:
+ * https://hpc-tutorials.llnl.gov/posix/joining_and_detaching/
  */
 void cleanup_threading(int nthreads);
 
