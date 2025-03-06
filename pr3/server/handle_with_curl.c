@@ -4,6 +4,13 @@
 #define MAX_REQUEST_N 512
 #define BUFSIZE (6226)
 
+// I need to declare these global variables here so that I can reference them in
+// the webproxy.c during the signal handler function so that we clean them up, otherwise
+// this is just memory that didn't get freed up. 
+CURL *curl = NULL;
+char *full_path = NULL;
+BuffStruct bufferStruct = {NULL, 0};
+
 ssize_t handle_with_curl(gfcontext_t *ctx, const char *path, void* arg) {
 	(void) ctx;
 	(void) arg;
@@ -16,7 +23,7 @@ ssize_t handle_with_curl(gfcontext_t *ctx, const char *path, void* arg) {
 		return -1;
 	}
 
-	char *full_path = get_full_url(path);
+	full_path = get_full_url(path);
 	if (full_path == NULL) {
 		perror("server: get_full_url failed");
 		curl_easy_cleanup(curl);
@@ -28,9 +35,8 @@ ssize_t handle_with_curl(gfcontext_t *ctx, const char *path, void* arg) {
 	curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L); // Follow redirects if necessary using the ALL flag
 	// curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L); // Fail on HTTP 4xx or 5xx errors so maybe we don't want this.
 
-	BuffStruct bufferStruct = {NULL, 0}; // Initialize the buffer struct
-
 	// Let's just create our own callback function for writing data
+	bufferStruct = (BuffStruct){NULL, 0};
 	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
 	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &bufferStruct); // Allows the write_callback to write to the BufferStruct
 	

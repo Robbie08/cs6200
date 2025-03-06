@@ -19,10 +19,16 @@ typedef struct {
 	size_t size; 	// current buff suize
 } BuffStruct; 
 
- size_t write_callback(void *data_ptr, size_t size, size_t nmemb, void *userdata);
+extern CURL *curl;
+extern char *full_path;
+extern BuffStruct bufferStruct;
 
- char * get_full_url(const char *path);
+size_t write_callback(void *data_ptr, size_t size, size_t nmemb, void *userdata);
 
- void cleanup(CURL *curl, char **full_path, BuffStruct *bufferStruct);
+char * get_full_url(const char *path);
+
+void cleanup(CURL *curl, char **full_path, BuffStruct *bufferStruct);
+
+//  void signal_handler(int signum);
  
  #endif // __SERVER_STUDENT_H__846

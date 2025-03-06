@@ -1,4 +1,6 @@
 #include "gfserver.h"
+#include "proxy-student.h"
+#include <signal.h>
 
 #define USAGE                                                                         \
 "usage:\n"                                                                            \
@@ -26,6 +28,7 @@ static gfserver_t gfs;
 
 static void _sig_handler(int signo){
   if (signo == SIGTERM || signo == SIGINT){
+    cleanup(curl, &full_path, &bufferStruct);
     gfserver_stop(&gfs);
     exit(signo);
   }
