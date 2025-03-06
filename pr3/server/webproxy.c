@@ -107,6 +107,7 @@ int main(int argc, char **argv) {
     gfserver_setopt(&gfs, GFS_WORKER_ARG, i, "arg");
   }
   // Invoke the framework - this is an infinite loop and shouldn't return
+  printf("Starting webproxy on port %d\n", port);
   gfserver_serve(&gfs);
   // not reached
   return -2209;
