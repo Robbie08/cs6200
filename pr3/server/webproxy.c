@@ -28,7 +28,7 @@ static gfserver_t gfs;
 
 static void _sig_handler(int signo){
   if (signo == SIGTERM || signo == SIGINT){
-    cleanup(curl, &full_path, &bufferStruct);
+    // cleanup(curl, &full_path, &bufferStruct);
     gfserver_stop(&gfs);
     exit(signo);
   }
@@ -99,6 +99,8 @@ int main(int argc, char **argv) {
     exit(__LINE__);
   }
 
+  // printf("server: %s\n", server);
+
   // Initialize server structure here
   gfserver_init(&gfs, nworkerthreads);
 // Set server options here
@@ -107,10 +109,12 @@ int main(int argc, char **argv) {
   gfserver_setopt(&gfs, GFS_PORT, port);
   // Set up arguments for worker here
   for(i = 0; i < nworkerthreads; i++) {
-    gfserver_setopt(&gfs, GFS_WORKER_ARG, i, "arg");
+    // Based on the gfserver.h the last arg is passed into the handler method 
+    // so we can just use that to pass the server
+    gfserver_setopt(&gfs, GFS_WORKER_ARG, i, (void *)server);
   }
   // Invoke the framework - this is an infinite loop and shouldn't return
-  printf("Starting webproxy on port %d\n", port);
+  // printf("Starting webproxy on port %d\n", port);
   gfserver_serve(&gfs);
   // not reached
   return -2209;

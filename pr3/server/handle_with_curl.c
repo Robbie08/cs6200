@@ -4,16 +4,9 @@
 #define MAX_REQUEST_N 512
 #define BUFSIZE (6226)
 
-// I need to declare these global variables here so that I can reference them in
-// the webproxy.c during the signal handler function so that we clean them up, otherwise
-// this is just memory that didn't get freed up. 
-CURL *curl = NULL;
-char *full_path = NULL;
-BuffStruct bufferStruct = {NULL, 0};
-
 ssize_t handle_with_curl(gfcontext_t *ctx, const char *path, void* arg) {
 	(void) ctx;
-	(void) arg;
+	const char *server = (const char *)arg;
 	(void) path;
 	errno = ENOSYS;
 
@@ -23,20 +16,21 @@ ssize_t handle_with_curl(gfcontext_t *ctx, const char *path, void* arg) {
 		return -1;
 	}
 
-	full_path = get_full_url(path);
+	char *full_path = get_full_url(path, server);
 	if (full_path == NULL) {
 		perror("server: get_full_url failed");
 		curl_easy_cleanup(curl);
 		return -1;
 	}
 
+	// printf("server: full_path: %s\n", full_path);
 	curl_easy_setopt(curl, CURLOPT_URL, (const char *)full_path); // must define the path otherwise no trasnfer will occur
 	curl_easy_setopt(curl, CURLOPT_ACCEPTTIMEOUT_MS, 5000L); // Don't wait longer than 5 seconds for FTP server to respond
 	curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L); // Follow redirects if necessary using the ALL flag
 	// curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L); // Fail on HTTP 4xx or 5xx errors so maybe we don't want this.
 
 	// Let's just create our own callback function for writing data
-	bufferStruct = (BuffStruct){NULL, 0};
+	BuffStruct bufferStruct = {NULL, 0};
 	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
 	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &bufferStruct); // Allows the write_callback to write to the BufferStruct
 	
@@ -54,7 +48,7 @@ ssize_t handle_with_curl(gfcontext_t *ctx, const char *path, void* arg) {
 	long http_code = 0;
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
 
-	if (http_code == 404) {
+	if (http_code == 404 || http_code == 403) {
 		// If we couldn't find the file then let's send a 404 error to the client
 		fprintf(stderr, "server: curl_easy_perform returned 404 error\n");
 		gfs_sendheader(ctx, GF_FILE_NOT_FOUND, 0);
@@ -109,9 +103,8 @@ size_t write_callback(void *data_ptr, size_t size, size_t nmemb, void *userdata)
  * This function will concatenate the base url with the path to the file to get the full url
  * to the file. This function allocates memory for the full url.
  */
-char * get_full_url(const char *path) {
-	char *base_url = "https://raw.githubusercontent.com/gt-cs6200/image_data";
-	size_t url_len = strlen(base_url) + strlen(path) + 1;
+char *get_full_url(const char *path, const char *server) {
+	size_t url_len = strlen(server) + strlen(path) + 1;
 	char *url = malloc(url_len);
 	if (url == NULL) {
 		perror("server: malloc failed to allocate memory");
@@ -119,8 +112,8 @@ char * get_full_url(const char *path) {
 	}
 
 	// The following will concatenate the base_url and the path
-	snprintf(url, url_len, "%s%s", base_url, path);
-	printf("server: url: %s\n", url);
+	snprintf(url, url_len, "%s%s", server, path);
+	// printf("server: url: %s\n", url);
 	return url;
 }
 
@@ -129,19 +122,19 @@ char * get_full_url(const char *path) {
  * and call the curl_easy_cleanup function to clean up the curl handle.
  */
 void cleanup(CURL *curl, char **full_path, BuffStruct *bufferStruct) {
-	if (*full_path != NULL) {
-		free(*full_path);
-		*full_path = NULL;
-	}
+    if (*full_path != NULL) {
+        free(*full_path);
+        *full_path = NULL;
+    }
 
-	if (bufferStruct->data != NULL) {
-		free(bufferStruct->data);
-		bufferStruct->data = NULL;
-	}
+    if (bufferStruct->data != NULL) {
+        free(bufferStruct->data);
+        bufferStruct->data = NULL;
+    }
 
-	if (curl != NULL) {
-		curl_easy_cleanup(curl);
-	}
+    if (curl != NULL) {
+        curl_easy_cleanup(curl);
+    }
 }
 
 /*
