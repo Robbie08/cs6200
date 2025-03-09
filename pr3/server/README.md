@@ -45,7 +45,7 @@ curl_easy_setopt(curl, CURLOPT_WRITEDATA, &bufferStruct);
 - Since I'm allowing redirects, I want to ensure we don't end up in some infinite loop or long chain of redirects. If a worker thread gets more than 5 redirects then we'll just terminate the transaction.
 
 `CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTPS`:
-- This was more for security, since I don't want to potentially be redirected to other servers with unsafe protocols. E.g. HTTPS -> HTTP, HTTP -> FTP, etc...
+- This was more for security, since I don't want to potentially be redirected to other servers with unsafe protocols. E.g. HTTPS -> HTTP, HTTPS -> FTP, etc...
 
 `CURLOPT_WRITEFUNCTION` & `CURLOPT_WRITEDATA`:
 - Because I wanted to be able to use my own write_callback method to allow for more flexibility and simplicity on the implementation side. You can read more about that below.
@@ -76,7 +76,7 @@ char *get_full_url(const char *path, const char *server) {
 ##### Dynamic Buffer for HTTP Response Storage
 An HTTP response can vary in size depending on the size of the file we're requesting on behalf of the client (e.g., Some files can be 1Kb and some files could be +30MB)
 
-I created a custom data structure `BuffStruct` that allows us to keep track of buffer content and size of the content.
+I created a custom data structure `BuffStruct` that allows us to keep track of buffer content and size of the content. I saw another approach using `curl_easy_getinfo()` and `CURLINFO_CONTENT_LENGTH_DOWNLOAD_T` to fetch the size of the file but that would require two requests to the server. The `libcurl` library already supplies us with the size of the file, we just need to calculate it by summing the product of `size` and `nmemb` which are supplied to the callback method every time it's called. Therefore, I needed the `size` in the `BuffStruct` to keep track of the running sum which results in the total size of the file.
 ```c
 typedef struct {
 	char *data; 	// ptr to the dynamically allocated buffer for response data
