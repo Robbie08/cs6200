@@ -15,7 +15,7 @@
  * https://curl.se/libcurl/c/CURLOPT_WRITEFUNCTION.html
  */
 typedef struct {
-	char *data; 	// ptr to the dynamically allocated buffer
+	char *data; 	// ptr to the dynamically allocated buffer for response data
 	size_t size; 	// current buff suize
 } BuffStruct; 
 

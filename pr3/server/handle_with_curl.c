@@ -23,12 +23,14 @@ ssize_t handle_with_curl(gfcontext_t *ctx, const char *path, void* arg) {
 		return -1;
 	}
 
-	// printf("server: full_path: %s\n", full_path);
+	printf("server: full_path: %s\n", full_path);
 	curl_easy_setopt(curl, CURLOPT_URL, (const char *)full_path); // must define the path otherwise no trasnfer will occur
-	curl_easy_setopt(curl, CURLOPT_ACCEPTTIMEOUT_MS, 5000L); // Don't wait longer than 5 seconds for FTP server to respond
+	curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 5000L); // timeout after 5 seconds if can't perform successful TCP handshake
 	curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L); // Follow redirects if necessary using the ALL flag
+	curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L); // Allow up to 5 redirects to avoid infinite loops or long chain of redirects
+	curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTPS); // Only allow redirects to HTTPS servers
 	// curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L); // Fail on HTTP 4xx or 5xx errors so maybe we don't want this.
-
+	
 	// Let's just create our own callback function for writing data
 	BuffStruct bufferStruct = {NULL, 0};
 	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
@@ -50,18 +52,19 @@ ssize_t handle_with_curl(gfcontext_t *ctx, const char *path, void* arg) {
 
 	if (http_code == 404 || http_code == 403) {
 		// If we couldn't find the file then let's send a 404 error to the client
-		fprintf(stderr, "server: curl_easy_perform returned 404 error\n");
+		fprintf(stderr, "server: curl_easy_perform returned 404 or 403 error... Responding to client with 'GF_FILE_NOT_FOUND' status.\n");
 		gfs_sendheader(ctx, GF_FILE_NOT_FOUND, 0);
 		cleanup(curl, &full_path, &bufferStruct);
 		return -1;
 	} else if (http_code >= 400) {
 		// For any other error 4xx and 5xx errors lets return a GF_ERROR
-		fprintf(stderr, "server: curl_easy_perform returned unexpected http code: %ld\n", http_code);
+		fprintf(stderr, "server: curl_easy_perform returned the error code: %ld\n", http_code);
 		gfs_sendheader(ctx, GF_ERROR, 0);
 		cleanup(curl, &full_path, &bufferStruct);
 		return -1;
 	}
 
+	printf("server: responding to client with 'GF_OK' status\n");
 	// If we get here then we have a successful response so just return GF_OK header and then data
 	gfs_sendheader(ctx, GF_OK, bufferStruct.size); // Send the buffer size to the client
 	gfs_send(ctx, bufferStruct.data, bufferStruct.size); // Send the actual data to the client
