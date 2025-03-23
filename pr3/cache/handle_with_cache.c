@@ -3,6 +3,9 @@
 
 #define BUFSIZE (834)
 
+int queue_counter = 0;
+pthread_mutex_t queue_counter_lock = PTHREAD_MUTEX_INITIALIZER;
+
 ssize_t handle_with_cache(gfcontext_t *ctx, const char *path, void* arg) {
 	(void) ctx;
 	const char *server = (const char *)arg;
@@ -203,4 +206,52 @@ ssize_t handle_with_cache_old(gfcontext_t *ctx, const char *path, void* arg){
 	return bytes_transferred;
 
 
+}
+
+int create_private_queue(char *q_name, mqd_t *mq_fd, size_t len) {
+	if (q_name == NULL || mq_fd == NULL) {
+		return -1;
+	}
+
+	snprintf(q_name, len, "/mq_private_rortiz_%d", atomic_int());
+	
+	struct mq_attr attr = {
+		.mq_flags = 0,
+		.mq_maxmsg = 10,
+		.mq_msgsize = sizeof(cache_request_t),
+		.mq_curmsgs = 0
+	};
+
+	*mq_fd = mq_open(q_name, O_CREAT | O_RDWR, 0666, &attr);
+	if (mq_fd == (mqd_t)-1) {
+		perror("mq_open failed in create_private_queue");
+		return -1;
+	}
+	return 0;
+}
+
+int destroy_private_queue(const char *q_name, mqd_t mq_fd) {
+	if (q_name == NULL || mq_fd == (mqd_t)-1) {
+		return -1;
+	}
+
+	if (mq_close(mq_fd) == -1) {
+		perror("mq_close failed in destroy_private_queue");
+		return -1;
+	}
+
+	if (mq_unlink(q_name) == -1) {
+		perror("mq_unlink failed in destroy_private_queue");
+		return -1;
+	}
+	return 0;
+}
+
+
+int atomic_int() {
+	int count;
+	pthread_mutex_lock(&queue_counter_lock);
+	count = queue_counter++;
+	pthread_mutex_unlock(&queue_counter_lock);
+	return count;
 }

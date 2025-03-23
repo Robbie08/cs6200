@@ -3,3 +3,4 @@ echoclient
 transferserver
 transferclient
 *.txt
+*.json

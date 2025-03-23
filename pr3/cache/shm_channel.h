@@ -34,22 +34,39 @@ typedef struct {
  * Used to communicate cache queries between Proxy & Cache.
  */
 
+/**
+ * Defines the type of operation to be performed on the cache. READ indicates
+ * that the proxy is requesting the file from the cache, while WRITE indicates
+ * that the cache is storing the file.
+ */
 typedef enum {
     CACHE_READ = 1,
     CACHE_WRITE = 2
 } request_type_t;
 
+/**
+ * Defines the type of response from the cache. This is used by the proxy
+ * to determine if the file was found in the cache or not.
+ */
 typedef enum {
     CACHE_HIT = 1,
     CACHE_MISS = 2
 } response_type_t;
 
+/**
+ * Structure for cache request. This gets published to the message queue
+ * and consumed by the cache dameon.
+ */
 typedef struct {
     request_type_t request_type;  
     char file_name[MAX_FILENAME_LEN]; 
     size_t file_size; 
 } cache_request_t;
 
+/**
+ * Structure for cache response. This gets consumed by the proxy thread
+ * through the private queue created by the proxy.
+ */
 typedef struct {
     response_type_t response_type;
     size_t shm_offset; 
