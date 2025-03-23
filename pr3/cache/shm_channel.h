@@ -9,7 +9,30 @@
 
 #define MAX_FILENAME_LEN 256
 #define MAX_FILE_SIZE 10485760  // 10MB max file size
+#define MQ_MAX_SIZE 8192
 
+/**
+ * IPC CHANNEL STRUCTURES (Message Queue & Shared Memory)
+ * Used to communicate between Proxy & Cache.
+ */
+
+sem_t *cache_sem = NULL;  // Global for both proxy and cache to access
+extern ipc_chan_t ipc_chan;
+
+typedef struct {
+    mqd_t mq_fd; // Message queue file descriptor
+    struct mq_attr mq_attr; // Message queue attributes
+    char mq_buffer[MQ_MAX_SIZE];
+
+    int shm_fd; // Shared memory file descriptor
+    void *shm_base; // Pointer to shared memory
+} ipc_chan_t;
+
+
+/**
+ * COMMAND CHANNEL STRUCTURE (Message Queue)
+ * Used to communicate cache queries between Proxy & Cache.
+ */
 
 typedef enum {
     CACHE_READ = 1,
@@ -21,10 +44,6 @@ typedef enum {
     CACHE_MISS = 2
 } response_type_t;
 
-/**
- * COMMAND CHANNEL STRUCTURE (Message Queue)
- * Used to communicate cache queries between Proxy & Cache.
- */
 typedef struct {
     request_type_t request_type;  
     char file_name[MAX_FILENAME_LEN]; 
@@ -134,5 +153,11 @@ ssize_t shm_channel_read(size_t shm_offset, void *dest, size_t file_size);
  * @return 0 on success, -1 on failure.
  */
 int shm_channel_destroy();
+
+/**
+ * Initializes the semaphore for synchronization.
+ * @return 0 on success, -1 on failure.
+ */
+int semaphore_init();
 
 #endif // _SHM_CHANNEL_H
