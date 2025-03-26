@@ -12,8 +12,109 @@ ssize_t handle_with_cache(gfcontext_t *ctx, const char *path, void* arg) {
 	(void) path;
 	errno = ENOSYS;
 
-	// TODO: Make a cache request asking if it has the file
-	// TODO: If it has the file then just respond back to the client
+	// Create a private message queue for the worker thread
+	size_t q_name_size = 64;
+	char q_name[q_name_size];
+	mqd_t pqm_fd;
+	int err = create_private_queue(q_name, &pqm_fd, q_name_size);
+	if (err == -1) {
+		perror("server: create_private_queue failed");
+		return -1;
+	}
+
+	ssize_t shm_offset = shm_channel_acquire_segment();
+	if (shm_offset == -1) {
+		fprintf(stderr, "Failed to acquire shared memory segment\n");
+		destroy_private_queue(q_name, pqm_fd);
+		return -1;
+	}
+
+	// Maps shm_file_t object into shared memory starting at the offset.
+	shm_file_t *shm_file = (shm_file_t *)((char *)ipc_chan.shm_base + shm_offset);
+	memset(shm_file, 0, sizeof(shm_file_t));
+
+	// Init the unnamed semaphore with pshared=1 to register the sem internally by
+	// the kernel as a shared process semaphore so that the cache can use it. 
+	// This lives in the shared memory region
+	// Larned more about it through the discussion here: 
+	// https://stackoverflow.com/questions/13145885/name-and-unnamed-semaphore
+	if (sem_init(&shm_file->chunk_ready_sem, 1, 0) == -1) {
+		perror("sem_init failed for shm_file struct");
+		shm_channel_release_segment(shm_offset);
+		destroy_private_queue(q_name, pqm_fd);
+		return -1;
+	}
+
+	// Create Request for to publish to the MQ. We need to send the private MQ fd
+	// to the cache so it can send the response back to the worker thread.
+	cache_request_t request = {
+		.request_type = CACHE_READ,
+		.private_mq_fd = pqm_fd,
+		.shm_offset = shm_offset
+	};
+
+	// copy the path of the file to the request.file_name
+	strncpy(request.file_name, path, MAX_FILENAME_LEN);
+
+	// Publish the request to the cache
+	err = mq_publish_request(&request);
+	if (err == -1) {
+		perror("server: mq_publish_request failed");
+		destroy_private_queue(q_name, pqm_fd);
+		shm_channel_release_segment(shm_offset);
+		return -1;
+	}
+
+	// Consume the response from the cache
+	cache_response_t response;
+	err = pmq_consume_request(&response, pqm_fd); // This will block until the cache responds to the private queue
+	if (err == -1) {
+		perror("server: pmq_consume_request failed");
+		destroy_private_queue(q_name, pqm_fd);
+		shm_channel_release_segment(shm_offset);
+		return -1;
+	}
+
+	// If we get a cache hit then we can just read the file from shared memory
+	// and send it to the client
+	if (response.response_type == CACHE_HIT) {
+		gfs_sendheader(ctx, GF_OK, response.file_size);
+		// TODO: Read the file from shared memory using the offset in the response
+		// TODO: Respond to the client with the file
+
+		size_t total_sent = 0;
+		while(1) {
+			if (sem_wait(&shm_file->chunk_ready_sem) == -1) {
+				perror("sem_wait: failed while reading from shared memory");
+				destroy_private_queue(q_name, pqm_fd);
+				shm_channel_release_segment(shm_offset);
+				return -1;
+			}
+
+			// The cache daemon worker will update the chunk_size based what it's sending
+			if (shm_file->chunk_size > 0) {
+				ssize_t bytes_sent = gfs_send(ctx, shm_file->data, shm_file->chunk_size);
+				if (bytes_sent < 0) {
+					fprintf(stderr, "Error while sending chunk to client\n");
+					destroy_private_queue(q_name, pqm_fd);
+					shm_channel_release_segment(shm_offset);
+					return -1;
+				}
+				total_sent += bytes_sent;
+				shm_file->chunk_size = 0; // reset chunk_size for daemon worker
+			}
+			
+			// The cache daemon worker will update is_done flag to true when done sending all contents
+			if (shm_file->is_done && total_sent >= shm_file->total_size) {
+				break;
+			}
+		}
+
+		sem_destroy(&shm_file->chunk_ready_sem); // avoid lingering semaphores
+		destroy_private_queue(q_name, pqm_fd);
+		shm_channel_release_segment(shm_offset);
+		return total_sent;
+	}
 
 	// If the file isn't found on the cache then request it from the server
 	CURL *curl = curl_easy_init(); 
@@ -74,11 +175,6 @@ ssize_t handle_with_cache(gfcontext_t *ctx, const char *path, void* arg) {
 	// If we get here then we have a successful response so just return GF_OK header and then data
 	gfs_sendheader(ctx, GF_OK, bufferStruct.size); // Send the buffer size to the client
 	gfs_send(ctx, bufferStruct.data, bufferStruct.size); // Send the actual data to the client
-
-
-	// TODO: Send the file to the cache. If the cache doesn't save the file because its full 
-	// or it runs into some other unknown error then it's ok I guess. Worst case we just
-	// request the file from the server again.
 
 	// clean the allocated memory
 	size_t total_size = bufferStruct.size;
@@ -223,7 +319,7 @@ int create_private_queue(char *q_name, mqd_t *mq_fd, size_t len) {
 	};
 
 	*mq_fd = mq_open(q_name, O_CREAT | O_RDWR, 0666, &attr);
-	if (mq_fd == (mqd_t)-1) {
+	if (*mq_fd == (mqd_t)-1) {
 		perror("mq_open failed in create_private_queue");
 		return -1;
 	}
@@ -246,7 +342,6 @@ int destroy_private_queue(const char *q_name, mqd_t mq_fd) {
 	}
 	return 0;
 }
-
 
 int atomic_int() {
 	int count;

@@ -139,10 +139,8 @@ int main(int argc, char **argv) {
     exit(__LINE__);
   }
 
-  /* Initialize shared memory set-up here
-  // Initialize server structure here
-  */
-  int err = ipc_init(nsegments);
+  /* Initialize shared memory set-up here*/
+  int err = ipc_init(segsize, nsegments);
   if (err == -1) {
     perror("server: ipc_init");
     return EXIT_FAILURE;
@@ -157,7 +155,7 @@ int main(int argc, char **argv) {
 
   // Set up arguments for worker here
   for(int i = 0; i < nworkerthreads; i++) {
-    gfserver_setopt(&gfs, GFS_WORKER_ARG, i, (void *)server);
+    gfserver_setopt(&gfs, GFS_WORKER_ARG, i, (void *)server); // need to provide the server to the handle_with_cache
   }
   
   // Invokethe framework - this is an infinite loop and will not return

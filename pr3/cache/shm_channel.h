@@ -6,6 +6,7 @@
 #include <sys/mman.h> // For Shared Memory
 #include <fcntl.h>    // For file descriptor flags
 #include <semaphore.h> // For synchronization
+#include "steque.h"
 
 #define MAX_FILENAME_LEN 256
 #define MAX_FILE_SIZE 10485760  // 10MB max file size
@@ -26,6 +27,11 @@ typedef struct {
 
     int shm_fd; // Shared memory file descriptor
     void *shm_base; // Pointer to shared memory
+    size_t segment_size;
+
+    steque_t offset_pool;
+    sem_t offset_pool; 
+    pthread_mutex_t offset_pool_lock;
 } ipc_chan_t;
 
 
@@ -60,7 +66,9 @@ typedef enum {
 typedef struct {
     request_type_t request_type;  
     char file_name[MAX_FILENAME_LEN]; 
-    size_t file_size; 
+    size_t file_size;
+    size_t shm_offset; 
+    mqd_t private_mq_fd; 
 } cache_request_t;
 
 /**
@@ -78,9 +86,12 @@ typedef struct {
  * Used to store cached files.
  */
 typedef struct {
-    char file_name[MAX_FILENAME_LEN];  
-    size_t file_size;  
-    int is_valid;  
+    size_t total_size;
+    size_t chunk_size;
+    size_t bytes_transferred;
+    int is_done;
+    int is_valid;
+    sem_t chunk_ready_sem;
     char data[];  
 } shm_file_t;
 
@@ -90,7 +101,7 @@ typedef struct {
  * @param shm_size The size of the shared memory segment.
  * @return 0 on success, -1 on failure.
  */
-int ipc_init(size_t shm_size);
+int ipc_init(size_t segment_size, size_t segment_count);
 
 
 /**
@@ -123,6 +134,15 @@ int mq_publish_request(cache_request_t *request);
  * @return 0 on success, -1 on failure.
  */
 int mq_consume_request(cache_response_t *response);
+
+/**
+ * Receives a cache lookup response from the cache.
+ * @param response Pointer to cache_response_t struct to store the response.
+ * @param pmq_fd The file descriptor for the private message queue where the cache will send the message
+ * @return 0 on success, -1 on failure.
+ */
+int pmq_consume_request(cache_response_t *resp, mqd_t pmq_fd);
+
 
 /**
  * Destroys the message queue.
@@ -172,7 +192,31 @@ ssize_t shm_channel_read(size_t shm_offset, void *dest, size_t file_size);
 int shm_channel_destroy();
 
 /**
- * Initializes the semaphore for synchronization.
+ * Created the pool of available offsets. The proxy will use this to 
+ * fetch available offsets that it can then send to the cache. This will
+ * be the Data Channel of communication between proxy and cache daemon.
+ */
+int shm_offset_pool_init(size_t seg_size, size_t segment_count);
+
+/**
+ * This function removes all the offsets from the queue, freeing them up one by one
+ * and then destroys the queue.
+ */
+void shm_offset_pool_destroy();
+
+/**
+ * This is a blocking function that picks up the next available offset from the offset pool.
+ */
+ssize_t shm_channel_acquire_segment(void);
+
+/**
+ * This function releases the segment back into the offset pool.
+ */
+int shm_channel_release_segment(size_t offset);
+
+/**
+ * Initializes the Global named semaphore for synchronization between Proxy and Cache
+ * workers to publish and consume requests and responses from the Message Queue
  * @return 0 on success, -1 on failure.
  */
 int semaphore_init();
