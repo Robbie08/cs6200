@@ -6,11 +6,9 @@
 #include <unistd.h>
 #include <mqueue.h>
 #include "shm_channel.h"
+#include "cache-student.h"
 
 #define MQ_MAX_SIZE 8192
-#define SHM_NAME "/shm_cache_rortiz"
-#define SEM_NAME "/sem_cache_rortiz"
-#define MQ_NAME "/mq_cache_rortiz"
 
 
 /**

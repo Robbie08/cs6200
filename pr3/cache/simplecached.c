@@ -25,6 +25,8 @@
 
 unsigned long int cache_delay;
 
+worker_pool_t worker_pool;
+
 static void _sig_handler(int signo){
 	if (signo == SIGTERM || signo == SIGINT){
 		// This is where your IPC clean up should occur
@@ -105,11 +107,86 @@ int main(int argc, char **argv) {
 		fprintf(stderr,"Unable to catch SIGTERM...exiting.\n");
 		exit(CACHE_FAILURE);
 	}
+
+	int err;
+	err = init_worker_pool(nthreads);
+	if (err != 0) {
+		perror("simplecached: failed to init the worker pool");
+		// TODO: add clean up here
+		exit(1);
+	}
+
+	err = init_threads(nthreads);
+	if (err != 0) {
+		perror("simplecached: failed to init the worker threads");
+		// TODO: add clean up here
+		exit(1);
+	}
+
 	/*Initialize cache*/
 	simplecache_init(cachedir);
 
 	// Cache should go here
 
+	// Keep on reading from the MQ and delegate the 
+	// requests to the worker threads.
+	for(;;) {
+		cache_request_t *request = malloc(sizeof(cache_request_t)); // TODO: remember to clean this up
+		if (!request) {
+			perror("simplecached: malloc failed");
+			// TODO: cleanup
+			exit(1);
+		}
+
+		int bytes_recv = mq_receive(MQ_NAME, (char *)request, sizeof(cache_request_t), NULL);
+		if (bytes_recv < 0) {
+			perror("simplecached: mq_receive failed");
+			// TODO: cleanup
+			exit(1);
+		}
+
+		// Publish the request to the steque 
+		pthread_mutex_lock(&worker_pool.q_lock);
+		steque_enqueue(&worker_pool.q_request, request);
+		pthread_cond_signal(&worker_pool.q_not_empty);
+		pthread_mutex_unlock(&worker_pool.q_lock);
+	}
+
 	// Line never reached
 	return -1;
+}
+
+int init_worker_pool(size_t numOfDelegates) {
+	int err = 0;
+	steque_init(&worker_pool.q_request); // init our queue for the request queue within our delegate pool object
+	err = pthread_mutex_init(&worker_pool.q_lock, NULL); // we must init our lock for the queue
+	if (err != 0) {
+		perror("simplecached: failed to initialize q_lock mutex");
+		return -1;
+	}
+
+	err = pthread_cond_init(&worker_pool.q_not_empty, NULL); // we must init our conditional variable 
+	if (err != 0) {
+		perror("simplecached: failed to initialize q_not_empty condition variable");
+		return -1;
+	}
+
+	// printf("successfully initialized delegate pool\n");
+	return 0;
+}
+
+int init_threads(size_t num_threads) {
+	for (int i = 0; i < num_threads; i++) {
+		// we want the delegate threads to be joinable to the delegator thread
+		int err = pthread_create(&worker_pool.pool[i], NULL, worker_process, NULL);
+		if (err != 0) {
+			perror("simplecached: pthread_create failed to create worker thread");
+			return -1;
+		}
+	}
+	return 0;
+}
+
+void * worker_process(void *args) {
+	// TODO: I'll need to encapsulate the worker logic in here'
 }
