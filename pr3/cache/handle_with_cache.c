@@ -116,6 +116,11 @@ ssize_t handle_with_cache(gfcontext_t *ctx, const char *path, void* arg) {
 		return total_sent;
 	}
 
+	// On a CACHE_MISS we don't need IPC related structs
+	sem_destroy(&shm_file->chunk_ready_sem); // avoid lingering semaphores
+	destroy_private_queue(q_name, pqm_fd);
+	shm_channel_release_segment(shm_offset);
+
 	// If the file isn't found on the cache then request it from the server
 	CURL *curl = curl_easy_init(); 
 	if (curl == NULL) {
