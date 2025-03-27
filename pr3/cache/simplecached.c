@@ -138,7 +138,7 @@ int main(int argc, char **argv) {
 			continue;
 		}
 
-		int bytes_recv = mq_receive(MQ_NAME, (char *)request, sizeof(cache_request_t), NULL);
+		int bytes_recv = mq_receive(ipc_chan.mq_fd, (char *)request, sizeof(cache_request_t), NULL);
 		if (bytes_recv < 0) {
 			perror("simplecached: mq_receive failed");
 			continue;
@@ -217,6 +217,7 @@ void * worker_process(void *args) {
 		if (err == -1) {
 			perror("simplecached send_file_to_shm failed");
 		}
+		free(req);
 	}
 }
 
@@ -279,13 +280,3 @@ void destroy_delegate_pool() {
 	pthread_cond_destroy(&worker_pool.q_not_empty);
 	// printf("Successfully destroyed delegate pool");
 }  
-  
-
-int pmq_publish_response(cache_response_t *resp, mqd_t pmq_fd) {
-	int err = mq_send(pmq_fd, (char *)resp, sizeof(cache_response_t), 0);
-	if (err == -1) {
-		perror("mq_send");
-		return -1;
-	}
-	return 0;
-}

@@ -11,6 +11,7 @@
 #include <stdlib.h>
 
 #include "cache-student.h"
+#include "shm_channel.h"
 #include "gfserver.h"
 
 // Note that the -n and -z parameters are NOT used for Part 1 
@@ -49,9 +50,9 @@ extern ssize_t handle_with_cache(gfcontext_t *ctx, char *path, void* arg);
 static void _sig_handler(int signo){
   if (signo == SIGTERM || signo == SIGINT){
     //cleanup could go here
-    int err = ipc_cleanup();
+    int err = ipc_destroy();
     if (err == -1) {
-      perror("server: ipc_cleanup");
+      perror("server: ipc_destroy");
     }
     gfserver_stop(&gfs);
     exit(signo);

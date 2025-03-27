@@ -6,7 +6,9 @@
 #include <sys/mman.h> // For Shared Memory
 #include <fcntl.h>    // For file descriptor flags
 #include <semaphore.h> // For synchronization
+#include <pthread.h>
 #include "steque.h"
+#include "cache-student.h"
 
 #define MAX_FILENAME_LEN 256
 #define MAX_FILE_SIZE 10485760  // 10MB max file size
@@ -16,9 +18,24 @@
  * IPC CHANNEL STRUCTURES (Message Queue & Shared Memory)
  * Used to communicate between Proxy & Cache.
  */
+ /**
+ * Defines the type of operation to be performed on the cache. READ indicates
+ * that the proxy is requesting the file from the cache, while WRITE indicates
+ * that the cache is storing the file.
+ */
+typedef enum {
+    CACHE_READ = 1,
+    CACHE_WRITE = 2
+} request_type_t;
 
-sem_t *cache_sem = NULL;  // Global for both proxy and cache to access
-extern ipc_chan_t ipc_chan;
+/**
+ * Defines the type of response from the cache. This is used by the proxy
+ * to determine if the file was found in the cache or not.
+ */
+typedef enum {
+    CACHE_HIT = 1,
+    CACHE_MISS = 2
+} response_type_t;
 
 typedef struct {
     mqd_t mq_fd; // Message queue file descriptor
@@ -30,10 +47,12 @@ typedef struct {
     size_t segment_size;
 
     steque_t offset_pool;
-    sem_t offset_pool; 
+    sem_t offset_pool_sem; 
     pthread_mutex_t offset_pool_lock;
 } ipc_chan_t;
 
+extern sem_t *cache_sem;  // Global for both proxy and cache to access
+extern ipc_chan_t ipc_chan;
 
 /**
  * COMMAND CHANNEL STRUCTURE (Message Queue)
@@ -49,7 +68,6 @@ typedef struct {
     char file_name[MAX_FILENAME_LEN]; 
     size_t file_size;
     size_t shm_offset; 
-    mqd_t private_mq_fd; 
 } cache_request_t;
 
 /**
@@ -110,29 +128,6 @@ int mq_channel_init();
  * @return 0 on success, -1 on failure.
  */
 int mq_publish_request(cache_request_t *request);
-
-/**
- * Receives a cache lookup response from the cache.
- * @param response Pointer to cache_response_t struct to store the response.
- * @return 0 on success, -1 on failure.
- */
-int mq_consume_request(cache_response_t *response);
-
-/**
- * Receives a cache lookup response from the cache.
- * @param response Pointer to cache_response_t struct to store the response.
- * @param pmq_fd The file descriptor for the private message queue where the cache will send the message
- * @return 0 on success, -1 on failure.
- */
-int pmq_consume_request(cache_response_t *resp, mqd_t pmq_fd);
-
-/**
- * Published a cache response to the MQ cache.
- * @param resp Pointer to cache_response_t struct
- * @param pmq_fd The file descriptor for the private message queue that the proxy has specified
- * @return 0 on success, -1 on failure.
- */
-int pmq_publish_response(cache_response_t *resp, mqd_t pmq_fd);
 
 
 /**

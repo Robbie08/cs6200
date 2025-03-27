@@ -12,20 +12,9 @@ ssize_t handle_with_cache(gfcontext_t *ctx, const char *path, void* arg) {
 	(void) path;
 	errno = ENOSYS;
 
-	// Create a private message queue for the worker thread
-	// size_t q_name_size = 64;
-	// char q_name[q_name_size];
-	// mqd_t pqm_fd;
-	// int err = create_private_queue(q_name, &pqm_fd, q_name_size);
-	// if (err == -1) {
-	// 	perror("server: create_private_queue failed");
-	// 	return -1;
-	// }
-
 	ssize_t shm_offset = shm_channel_acquire_segment();
 	if (shm_offset == -1) {
 		fprintf(stderr, "Failed to acquire shared memory segment\n");
-		// destroy_private_queue(q_name, pqm_fd);
 		return -1;
 	}
 
@@ -41,42 +30,29 @@ ssize_t handle_with_cache(gfcontext_t *ctx, const char *path, void* arg) {
 	if (sem_init(&shm_file->chunk_ready_sem, 1, 0) == -1) {
 		perror("sem_init failed for shm_file struct");
 		shm_channel_release_segment(shm_offset);
-		// destroy_private_queue(q_name, pqm_fd);
 		return -1;
 	}
 
-	// Create Request for to publish to the MQ. We need to send the private MQ fd
-	// to the cache so it can send the response back to the worker thread.
+	// Create Request for to publish to the MQ. 
 	cache_request_t request = {
 		.request_type = CACHE_READ,
 		.shm_offset = shm_offset
 	};
 
 	// copy the path of the file to the request.file_name
-	strncpy(request.file_name, path, MAX_FILENAME_LEN);
+	strncpy(request.file_name, path, MAX_FILENAME_LEN-1);
+	request.file_name[MAX_FILENAME_LEN-1] = '\0';
 
 	// Publish the request to the cache
 	int err = mq_publish_request(&request);
 	if (err == -1) {
 		perror("server: mq_publish_request failed");
-		// destroy_private_queue(q_name, pqm_fd);
 		shm_channel_release_segment(shm_offset);
 		return -1;
 	}
 
-	// // Consume the response from the cache
-	// cache_response_t response;
-	// err = pmq_consume_request(&response, pqm_fd); // This will block until the cache responds to the private queue
-	// if (err == -1) {
-	// 	perror("server: pmq_consume_request failed");
-	// 	destroy_private_queue(q_name, pqm_fd);
-	// 	shm_channel_release_segment(shm_offset);
-	// 	return -1;
-	// }
-
 	if (sem_wait(&shm_file->chunk_ready_sem) == -1) {
 		perror("sem_wait: failed while reading from shared memory");
-		// destroy_private_queue(q_name, pqm_fd);
 		shm_channel_release_segment(shm_offset);
 		return -1;
 	}
@@ -89,7 +65,6 @@ ssize_t handle_with_cache(gfcontext_t *ctx, const char *path, void* arg) {
 		for(;;) {
 			if (sem_wait(&shm_file->chunk_ready_sem) == -1) {
 				perror("sem_wait: failed while reading from shared memory");
-				// destroy_private_queue(q_name, pqm_fd);
 				shm_channel_release_segment(shm_offset);
 				return -1;
 			}
@@ -99,7 +74,6 @@ ssize_t handle_with_cache(gfcontext_t *ctx, const char *path, void* arg) {
 				ssize_t bytes_sent = gfs_send(ctx, shm_file->data, shm_file->chunk_size);
 				if (bytes_sent < 0) {
 					fprintf(stderr, "Error while sending chunk to client\n");
-					// destroy_private_queue(q_name, pqm_fd);
 					shm_channel_release_segment(shm_offset);
 					return -1;
 				}
@@ -114,14 +88,12 @@ ssize_t handle_with_cache(gfcontext_t *ctx, const char *path, void* arg) {
 		}
 
 		sem_destroy(&shm_file->chunk_ready_sem); // avoid lingering semaphores
-		// destroy_private_queue(q_name, pqm_fd);
 		shm_channel_release_segment(shm_offset);
 		return total_sent;
 	}
 
 	// On a CACHE_MISS we don't need IPC related structs
 	sem_destroy(&shm_file->chunk_ready_sem); // avoid lingering semaphores
-	// destroy_private_queue(q_name, pqm_fd);
 	shm_channel_release_segment(shm_offset);
 
 	// If the file isn't found on the cache then request it from the server
@@ -310,51 +282,4 @@ ssize_t handle_with_cache_old(gfcontext_t *ctx, const char *path, void* arg){
 	return bytes_transferred;
 
 
-}
-
-int create_private_queue(char *q_name, mqd_t *mq_fd, size_t len) {
-	if (q_name == NULL || mq_fd == NULL) {
-		return -1;
-	}
-
-	snprintf(q_name, len, "/mq_private_rortiz_%d", atomic_int());
-	
-	struct mq_attr attr = {
-		.mq_flags = 0,
-		.mq_maxmsg = 10,
-		.mq_msgsize = sizeof(cache_request_t),
-		.mq_curmsgs = 0
-	};
-
-	*mq_fd = mq_open(q_name, O_CREAT | O_RDWR, 0666, &attr);
-	if (*mq_fd == (mqd_t)-1) {
-		perror("mq_open failed in create_private_queue");
-		return -1;
-	}
-	return 0;
-}
-
-int destroy_private_queue(const char *q_name, mqd_t mq_fd) {
-	if (q_name == NULL || mq_fd == (mqd_t)-1) {
-		return -1;
-	}
-
-	if (mq_close(mq_fd) == -1) {
-		perror("mq_close failed in destroy_private_queue");
-		return -1;
-	}
-
-	if (mq_unlink(q_name) == -1) {
-		perror("mq_unlink failed in destroy_private_queue");
-		return -1;
-	}
-	return 0;
-}
-
-int atomic_int() {
-	int count;
-	pthread_mutex_lock(&queue_counter_lock);
-	count = queue_counter++;
-	pthread_mutex_unlock(&queue_counter_lock);
-	return count;
 }

@@ -17,25 +17,6 @@
  #define SEM_NAME "/sem_cache_rortiz"
  #define MQ_NAME "/mq_cache_rortiz"
 
- /**
- * Defines the type of operation to be performed on the cache. READ indicates
- * that the proxy is requesting the file from the cache, while WRITE indicates
- * that the cache is storing the file.
- */
-typedef enum {
-    CACHE_READ = 1,
-    CACHE_WRITE = 2
-} request_type_t;
-
-/**
- * Defines the type of response from the cache. This is used by the proxy
- * to determine if the file was found in the cache or not.
- */
-typedef enum {
-    CACHE_HIT = 1,
-    CACHE_MISS = 2
-} response_type_t;
-
 
  /**
   * This struct encapsulates the variables for the worker pool. This
@@ -68,22 +49,6 @@ size_t write_callback(void *data_ptr, size_t size, size_t nmemb, void *userdata)
 char *get_full_url(const char *path, const char *server);
 
 /**
- * This function will create a private POSIX message queue for the worker thread on the proxy.
- */
-int create_private_queue();
-
-/**
- * This function will destroy the POSIX message queue created by the worker thread on the proxy.
- */
-int destroy_private_queue();
-
-
-/**
- * This returns an atomic integer which is used for creating unique private message queues.
- */
-int atomic_int();
-
-/**
  * This function initializes the delegate pool which includes the
  * queue, queue mutex, and queue conditional variable. 
  * 
@@ -103,6 +68,34 @@ int init_worker_pool(size_t numOfDelegates);
  * https://hpc-tutorials.llnl.gov/posix/joining_and_detaching/
  */
 int init_threads(size_t numthreads);
+
+/**
+ * This function cleans up threads created by joining them back.ACCESSPERMS
+ * I used this function from my implementation
+ * of pr1 part2 from this semester.
+ * 
+ */
+void cleanup_threading(int nthreads);
+
+/**
+ * Destroys the delegate pool created
+ * I used this function from my implementation
+ * of pr1 part2 from this semester.
+ */
+void destroy_delegate_pool();
+
+
+/**
+ * This handler performs the work that each cache daemon must perform.
+ */
+void * worker_process(void *args);
+
+
+/**
+ * This is a helper function created to send the contents of the file read
+ * from shared memory buffer to the client.
+ */
+int send_file_to_shm(shm_file_t *shm_file, int file_fd, cache_request_t *req);
 
 void cleanup(CURL *curl, char **full_path, BuffStruct *bufferStruct);
  #endif // __CACHE_STUDENT_H__844

@@ -5,7 +5,6 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <mqueue.h>
-#include "shm_channel.h"
 #include "cache-student.h"
 
 #define MQ_MAX_SIZE 8192
@@ -16,6 +15,7 @@
  */
 
 ipc_chan_t ipc_chan;
+sem_t *cache_sem = NULL;  
 
 int shm_channel_init(size_t size) {
     ipc_chan.shm_fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
@@ -236,25 +236,10 @@ int shm_channel_release_segment(size_t offset) {
     return 0;
 }
 
-
 int mq_publish_request(cache_request_t *req) {
     mqd_t mq = ipc_chan.mq_fd;
     if (mq_send(mq, (char *)req, sizeof(cache_request_t), 0) == -1) {
         perror("mq_publish_request: mq_send");
-        return -1;
-    }
-    return 0;
-}
-
-int pmq_consume_request(cache_response_t *resp, mqd_t pmq_fd) {
-    ssize_t bytes_recvd = mq_receive(pmq_fd, (char *)resp, sizeof(cache_response_t), NULL);
-    if (bytes_recvd == -1) {
-        perror("pmq_consume_request: mq_receive");
-        return -1;
-    }
-
-    if ((size_t)bytes_recvd != sizeof(cache_response_t)) {
-        fprintf(stderr, "pmq_consume_request: received partial message (%zd bytes)\n", bytes_recvd);
         return -1;
     }
     return 0;
