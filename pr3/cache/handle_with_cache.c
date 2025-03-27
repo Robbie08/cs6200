@@ -13,19 +13,19 @@ ssize_t handle_with_cache(gfcontext_t *ctx, const char *path, void* arg) {
 	errno = ENOSYS;
 
 	// Create a private message queue for the worker thread
-	size_t q_name_size = 64;
-	char q_name[q_name_size];
-	mqd_t pqm_fd;
-	int err = create_private_queue(q_name, &pqm_fd, q_name_size);
-	if (err == -1) {
-		perror("server: create_private_queue failed");
-		return -1;
-	}
+	// size_t q_name_size = 64;
+	// char q_name[q_name_size];
+	// mqd_t pqm_fd;
+	// int err = create_private_queue(q_name, &pqm_fd, q_name_size);
+	// if (err == -1) {
+	// 	perror("server: create_private_queue failed");
+	// 	return -1;
+	// }
 
 	ssize_t shm_offset = shm_channel_acquire_segment();
 	if (shm_offset == -1) {
 		fprintf(stderr, "Failed to acquire shared memory segment\n");
-		destroy_private_queue(q_name, pqm_fd);
+		// destroy_private_queue(q_name, pqm_fd);
 		return -1;
 	}
 
@@ -41,7 +41,7 @@ ssize_t handle_with_cache(gfcontext_t *ctx, const char *path, void* arg) {
 	if (sem_init(&shm_file->chunk_ready_sem, 1, 0) == -1) {
 		perror("sem_init failed for shm_file struct");
 		shm_channel_release_segment(shm_offset);
-		destroy_private_queue(q_name, pqm_fd);
+		// destroy_private_queue(q_name, pqm_fd);
 		return -1;
 	}
 
@@ -49,7 +49,6 @@ ssize_t handle_with_cache(gfcontext_t *ctx, const char *path, void* arg) {
 	// to the cache so it can send the response back to the worker thread.
 	cache_request_t request = {
 		.request_type = CACHE_READ,
-		.private_mq_fd = pqm_fd,
 		.shm_offset = shm_offset
 	};
 
@@ -57,36 +56,40 @@ ssize_t handle_with_cache(gfcontext_t *ctx, const char *path, void* arg) {
 	strncpy(request.file_name, path, MAX_FILENAME_LEN);
 
 	// Publish the request to the cache
-	err = mq_publish_request(&request);
+	int err = mq_publish_request(&request);
 	if (err == -1) {
 		perror("server: mq_publish_request failed");
-		destroy_private_queue(q_name, pqm_fd);
+		// destroy_private_queue(q_name, pqm_fd);
 		shm_channel_release_segment(shm_offset);
 		return -1;
 	}
 
-	// Consume the response from the cache
-	cache_response_t response;
-	err = pmq_consume_request(&response, pqm_fd); // This will block until the cache responds to the private queue
-	if (err == -1) {
-		perror("server: pmq_consume_request failed");
-		destroy_private_queue(q_name, pqm_fd);
+	// // Consume the response from the cache
+	// cache_response_t response;
+	// err = pmq_consume_request(&response, pqm_fd); // This will block until the cache responds to the private queue
+	// if (err == -1) {
+	// 	perror("server: pmq_consume_request failed");
+	// 	destroy_private_queue(q_name, pqm_fd);
+	// 	shm_channel_release_segment(shm_offset);
+	// 	return -1;
+	// }
+
+	if (sem_wait(&shm_file->chunk_ready_sem) == -1) {
+		perror("sem_wait: failed while reading from shared memory");
+		// destroy_private_queue(q_name, pqm_fd);
 		shm_channel_release_segment(shm_offset);
 		return -1;
 	}
 
 	// If we get a cache hit then we can just read the file from shared memory
 	// and send it to the client
-	if (response.response_type == CACHE_HIT) {
-		gfs_sendheader(ctx, GF_OK, response.file_size);
-		// TODO: Read the file from shared memory using the offset in the response
-		// TODO: Respond to the client with the file
-
+	if (shm_file->response_type == CACHE_HIT) {
+		gfs_sendheader(ctx, GF_OK, shm_file->file_size);
 		size_t total_sent = 0;
-		while(1) {
+		for(;;) {
 			if (sem_wait(&shm_file->chunk_ready_sem) == -1) {
 				perror("sem_wait: failed while reading from shared memory");
-				destroy_private_queue(q_name, pqm_fd);
+				// destroy_private_queue(q_name, pqm_fd);
 				shm_channel_release_segment(shm_offset);
 				return -1;
 			}
@@ -96,7 +99,7 @@ ssize_t handle_with_cache(gfcontext_t *ctx, const char *path, void* arg) {
 				ssize_t bytes_sent = gfs_send(ctx, shm_file->data, shm_file->chunk_size);
 				if (bytes_sent < 0) {
 					fprintf(stderr, "Error while sending chunk to client\n");
-					destroy_private_queue(q_name, pqm_fd);
+					// destroy_private_queue(q_name, pqm_fd);
 					shm_channel_release_segment(shm_offset);
 					return -1;
 				}
@@ -111,14 +114,14 @@ ssize_t handle_with_cache(gfcontext_t *ctx, const char *path, void* arg) {
 		}
 
 		sem_destroy(&shm_file->chunk_ready_sem); // avoid lingering semaphores
-		destroy_private_queue(q_name, pqm_fd);
+		// destroy_private_queue(q_name, pqm_fd);
 		shm_channel_release_segment(shm_offset);
 		return total_sent;
 	}
 
 	// On a CACHE_MISS we don't need IPC related structs
 	sem_destroy(&shm_file->chunk_ready_sem); // avoid lingering semaphores
-	destroy_private_queue(q_name, pqm_fd);
+	// destroy_private_queue(q_name, pqm_fd);
 	shm_channel_release_segment(shm_offset);
 
 	// If the file isn't found on the cache then request it from the server

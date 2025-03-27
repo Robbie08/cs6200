@@ -41,25 +41,6 @@ typedef struct {
  */
 
 /**
- * Defines the type of operation to be performed on the cache. READ indicates
- * that the proxy is requesting the file from the cache, while WRITE indicates
- * that the cache is storing the file.
- */
-typedef enum {
-    CACHE_READ = 1,
-    CACHE_WRITE = 2
-} request_type_t;
-
-/**
- * Defines the type of response from the cache. This is used by the proxy
- * to determine if the file was found in the cache or not.
- */
-typedef enum {
-    CACHE_HIT = 1,
-    CACHE_MISS = 2
-} response_type_t;
-
-/**
  * Structure for cache request. This gets published to the message queue
  * and consumed by the cache dameon.
  */
@@ -86,6 +67,8 @@ typedef struct {
  * Used to store cached files.
  */
 typedef struct {
+    response_type_t response_type;
+    size_t file_size;
     size_t total_size;
     size_t chunk_size;
     size_t bytes_transferred;
@@ -142,6 +125,14 @@ int mq_consume_request(cache_response_t *response);
  * @return 0 on success, -1 on failure.
  */
 int pmq_consume_request(cache_response_t *resp, mqd_t pmq_fd);
+
+/**
+ * Published a cache response to the MQ cache.
+ * @param resp Pointer to cache_response_t struct
+ * @param pmq_fd The file descriptor for the private message queue that the proxy has specified
+ * @return 0 on success, -1 on failure.
+ */
+int pmq_publish_response(cache_response_t *resp, mqd_t pmq_fd);
 
 
 /**

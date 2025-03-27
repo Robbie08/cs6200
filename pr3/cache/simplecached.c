@@ -24,12 +24,15 @@
 #define MAX_SIMPLE_CACHE_QUEUE_SIZE 782  
 
 unsigned long int cache_delay;
-
 worker_pool_t worker_pool;
+int nthreads;
 
 static void _sig_handler(int signo){
 	if (signo == SIGTERM || signo == SIGINT){
 		// This is where your IPC clean up should occur
+		cleanup_threading(nthreads);
+		destroy_delegate_pool();
+		simplecache_destroy();
 		exit(signo);
 	}
 }
@@ -58,7 +61,7 @@ void Usage() {
 }
 
 int main(int argc, char **argv) {
-	int nthreads = 8;
+	nthreads = 8;
 	char *cachedir = "locals.txt";
 	char option_char;
 
@@ -112,14 +115,12 @@ int main(int argc, char **argv) {
 	err = init_worker_pool(nthreads);
 	if (err != 0) {
 		perror("simplecached: failed to init the worker pool");
-		// TODO: add clean up here
 		exit(1);
 	}
 
 	err = init_threads(nthreads);
 	if (err != 0) {
 		perror("simplecached: failed to init the worker threads");
-		// TODO: add clean up here
 		exit(1);
 	}
 
@@ -134,15 +135,13 @@ int main(int argc, char **argv) {
 		cache_request_t *request = malloc(sizeof(cache_request_t)); // TODO: remember to clean this up
 		if (!request) {
 			perror("simplecached: malloc failed");
-			// TODO: cleanup
-			exit(1);
+			continue;
 		}
 
 		int bytes_recv = mq_receive(MQ_NAME, (char *)request, sizeof(cache_request_t), NULL);
 		if (bytes_recv < 0) {
 			perror("simplecached: mq_receive failed");
-			// TODO: cleanup
-			exit(1);
+			continue;
 		}
 
 		// Publish the request to the steque 
@@ -188,5 +187,105 @@ int init_threads(size_t num_threads) {
 }
 
 void * worker_process(void *args) {
-	// TODO: I'll need to encapsulate the worker logic in here'
+	for(;;) {
+		pthread_mutex_lock(&worker_pool.q_lock);
+
+		// Wait until the signal is sent to process requests
+		while(steque_isempty(&worker_pool.q_request)) {
+			pthread_cond_wait(&worker_pool.q_not_empty, &worker_pool.q_lock);
+		}
+
+		cache_request_t *req = steque_pop(&worker_pool.q_request);
+		pthread_mutex_unlock(&worker_pool.q_lock);
+
+		// load our shm_file object for the segment that the proxy sent us
+		shm_file_t *shm_file = (shm_file_t *)((char *)ipc_chan.shm_base + req->shm_offset);
+		memset(shm_file, 0, sizeof(shm_file_t));
+
+		int file_fd = simplecache_get(req->file_name);
+		if (file_fd == -1) {
+			// This indicates a CACHE_MISS so we can just update the shm_file object
+			// reference in shared memory to CACHE_MISS and update the semaphore
+			shm_file->response_type = CACHE_MISS;
+			sem_post(&shm_file->chunk_ready_sem); // wake up proxy
+			free(req);
+			continue;
+		}
+
+		// This indicates a CACHE_HIT so we need to send the file in chunks to the shard memory
+		int err = send_file_to_shm(shm_file, file_fd, req);
+		if (err == -1) {
+			perror("simplecached send_file_to_shm failed");
+		}
+	}
+}
+
+int send_file_to_shm(shm_file_t *shm_file, int file_fd, cache_request_t *req) {
+	struct stat statbuff; // we want to store file info so that we can get the file size
+	if (fstat(file_fd, &statbuff) == -1) {
+		perror("simplecached fstat failed");
+		shm_file->response_type = CACHE_MISS;
+		sem_post(&shm_file->chunk_ready_sem);
+		free(req);
+		return -1;
+	}
+
+	shm_file->response_type = CACHE_HIT;
+	shm_file->file_size = statbuff.st_size;
+	shm_file->total_size = statbuff.st_size;
+	shm_file->is_done = 0;
+	shm_file->is_valid = 1;
+
+	char buffer[CHUNK_SIZE];
+	size_t total_bytes_sent = 0;
+	size_t bytes_read = 0;
+
+	sem_post(&shm_file->chunk_ready_sem); // Wake up our proxy
+	while((bytes_read = read(file_fd, buffer, CHUNK_SIZE)) > 0) {
+		memcpy(shm_file->data, buffer, bytes_read);
+		shm_file->chunk_size = bytes_read; 
+		sem_post(&shm_file->chunk_ready_sem); // let proxy know there is chunks to read
+
+		total_bytes_sent += bytes_read;
+		// We will keep looping until the proxy resets the chunk size to 0
+		while(shm_file->chunk_size != 0) {
+			usleep(200);
+		}
+	}
+
+	if (bytes_read == 0) {
+		perror("simplecached: read 0 bytes from file");
+	}
+	shm_file->is_done = 1;
+	sem_post(&shm_file->chunk_ready_sem); // notify proxy that we're done
+	free(req);
+	return 0;
+}
+
+void cleanup_threading(int nthreads) {
+	for (size_t i = 0; i < nthreads; i++) {
+	  int err = pthread_join(worker_pool.pool[i], NULL);
+	  if (err != 0) {
+		  fprintf(stderr, "Error joining thread %zu: %s\n", i, strerror(err));
+	  }
+	  // printf("Successfully joined thread %zu\n", i);
+	  
+	}
+}
+
+void destroy_delegate_pool() {
+	steque_destroy(&worker_pool.q_request);
+	pthread_mutex_destroy(&worker_pool.q_lock);
+	pthread_cond_destroy(&worker_pool.q_not_empty);
+	// printf("Successfully destroyed delegate pool");
+}  
+  
+
+int pmq_publish_response(cache_response_t *resp, mqd_t pmq_fd) {
+	int err = mq_send(pmq_fd, (char *)resp, sizeof(cache_response_t), 0);
+	if (err == -1) {
+		perror("mq_send");
+		return -1;
+	}
+	return 0;
 }

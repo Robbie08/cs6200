@@ -11,10 +11,31 @@
  #include <curl/curl.h> 
 
  #define MAX_WORKERS 64
+ #define CHUNK_SIZE 8192
 
  #define SHM_NAME "/shm_cache_rortiz"
  #define SEM_NAME "/sem_cache_rortiz"
  #define MQ_NAME "/mq_cache_rortiz"
+
+ /**
+ * Defines the type of operation to be performed on the cache. READ indicates
+ * that the proxy is requesting the file from the cache, while WRITE indicates
+ * that the cache is storing the file.
+ */
+typedef enum {
+    CACHE_READ = 1,
+    CACHE_WRITE = 2
+} request_type_t;
+
+/**
+ * Defines the type of response from the cache. This is used by the proxy
+ * to determine if the file was found in the cache or not.
+ */
+typedef enum {
+    CACHE_HIT = 1,
+    CACHE_MISS = 2
+} response_type_t;
+
 
  /**
   * This struct encapsulates the variables for the worker pool. This
