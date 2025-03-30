@@ -3,14 +3,33 @@
 
 #define BUFSIZE (834)
 
-int queue_counter = 0;
-pthread_mutex_t queue_counter_lock = PTHREAD_MUTEX_INITIALIZER;
+int cache_init = 0;
+pthread_mutex_t cache_init_lock = PTHREAD_MUTEX_INITIALIZER;
 
 ssize_t handle_with_cache(gfcontext_t *ctx, const char *path, void* arg) {
 	(void) ctx;
 	const char *server = (const char *)arg;
 	(void) path;
 	errno = ENOSYS;
+	
+	pthread_mutex_lock(&cache_init_lock);
+	if (cache_init == 0) {
+		cache_request_t init_request = {
+			.segment_count = ipc_chan.segment_count,
+			.segment_size = ipc_chan.segment_size,
+			.request_type = CACHE_INIT
+		};
+	
+		int err = mq_publish_request(&init_request);
+		if (err == -1) {
+			perror("server: mq_publish_request failed");
+			pthread_mutex_unlock(&cache_init_lock);
+			return -1;
+		}
+		cache_init = 1;
+	}
+	pthread_mutex_unlock(&cache_init_lock);
+
 
 	ssize_t shm_offset = shm_channel_acquire_segment();
 	if (shm_offset == -1) {

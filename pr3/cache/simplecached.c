@@ -111,6 +111,14 @@ int main(int argc, char **argv) {
 		exit(CACHE_FAILURE);
 	}
 
+	// Open message queue (created by proxy)
+	ipc_chan.mq_fd = mq_open(MQ_NAME, O_RDONLY);
+	if (ipc_chan.mq_fd == -1) {
+		perror("mq_open failed in cache");
+		exit(1);
+	}
+
+
 	int err;
 	err = init_worker_pool(nthreads);
 	if (err != 0) {
@@ -141,6 +149,24 @@ int main(int argc, char **argv) {
 		int bytes_recv = mq_receive(ipc_chan.mq_fd, (char *)request, sizeof(cache_request_t), NULL);
 		if (bytes_recv < 0) {
 			perror("simplecached: mq_receive failed");
+			continue;
+		}
+
+		if (request->request_type == CACHE_INIT) {
+			// Open existing shared memory (created by proxy)
+			ipc_chan.shm_fd = shm_open(SHM_NAME, O_RDWR, 0666);
+			if (ipc_chan.shm_fd == -1) {
+				perror("shm_open failed in cache");
+				exit(1);
+			}
+
+			// mmap the region
+			ipc_chan.shm_base = mmap(NULL, request->segment_size * request->segment_count, PROT_READ | PROT_WRITE, MAP_SHARED, ipc_chan.shm_fd, 0);
+			if (ipc_chan.shm_base == MAP_FAILED) {
+				perror("mmap failed in cache");
+				exit(1);
+			}
+			free(request);
 			continue;
 		}
 

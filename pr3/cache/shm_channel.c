@@ -10,10 +10,6 @@
 #define MQ_MAX_SIZE 8192
 
 
-/**
- * SHARED MEMORY FUNCTIONS
- */
-
 ipc_chan_t ipc_chan;
 sem_t *cache_sem = NULL;  
 
@@ -30,15 +26,6 @@ int shm_channel_init(size_t size) {
     ipc_chan.shm_base = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, ipc_chan.shm_fd, 0);
     if (ipc_chan.shm_base == MAP_FAILED) {
         perror("mmap failed");
-        return -1;
-    }
-    return 0;
-}
-
-int shm_channel_attach() {
-    ipc_chan.shm_fd = shm_open(SHM_NAME, O_RDWR, 0666);
-    if (ipc_chan.shm_fd == -1) {
-        perror("shm_open attach failed");
         return -1;
     }
     return 0;
@@ -82,7 +69,8 @@ int ipc_init(size_t segment_size, size_t segment_count) {
         fprintf(stderr, "Failed to initialize Message Queue\n");
         return -1;
     }
-
+    ipc_chan.segment_size = segment_size;
+    ipc_chan.segment_count = segment_count;
     size_t shm_size = segment_size * segment_count;
     err = shm_channel_init(shm_size);
     if (err == -1) {
