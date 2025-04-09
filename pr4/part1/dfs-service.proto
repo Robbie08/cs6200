@@ -7,19 +7,62 @@ service DFSService {
     // Add your service calls here
 
     // 1. REQUIRED (Parts 1 & 2): A method to store files on the server
+    rpc StoreFile(StoreFileRequest) returns (GenericResponse);
 
     // 2. REQUIRED (Parts 1 & 2): A method to fetch files from the server
+    rpc GetFile(GenericRequest) returns (GetFileResponse);
 
     // 3. REQUIRED (Parts 1 & 2): A method to delete files from the server
+    rpc DeleteFile(GenericRequest) returns (GenericResponse);
 
     // 4. REQUIRED (Parts 1 & 2): A method to list all files on the server
+    rpc GetAllFiles(GetAllFilesRequest) returns (GetAllFilesResponse);
 
     // 5. REQUIRED (Parts 1 & 2): A method to get the status of a file on the server
+    rpc GetFileStatus(GenericRequest) returns (GenericResponse);
 
     // 7. Any other methods you deem necessary to complete the tasks of this assignment
-
-
 }
 
 // Add your message types here
 
+enum FileStatus {
+    OK = 0;
+    CANCELLED = 1;
+    DEADLINE_EXCEEDED = 4;
+    FILE_NOT_FOUND = 5;
+    ALREADY_EXISTS = 6; 
+    RESOURCE_EXHAUSTED = 8;
+}
+
+message StoreFileRequest {
+    int64 size = 1;     // File size in bytes
+    string name = 2;    // File name
+}
+
+message GetFileResponse {
+    int64 size = 1;         // File size in bytes
+    string name = 2;        // File name
+    FileStatus status = 3;  // Status (grpc::OK, grpc::FILE_NOT_FOUND, etc..)
+    int64 mtime = 4;        // Last modified time
+    bytes content = 5;      // The contents of the file
+}
+
+message GenericRequest {
+    string name = 1; // File name
+}
+
+message GenericResponse {
+    int64 size = 1;         // File size in bytes
+    string name = 2;        // File name
+    FileStatus status = 3;  // Status (grpc::OK, grpc::FILE_NOT_FOUND, etc..)
+    int64 mtime = 4;        // Last modified time
+}
+
+message GetAllFilesRequest {
+    // empty message
+}
+
+message GetAllFilesResponse {
+    repeated GenericResponse files = 1; // List of files
+}
