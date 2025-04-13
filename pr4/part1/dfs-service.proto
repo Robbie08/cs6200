@@ -7,7 +7,7 @@ service DFSService {
     // Add your service calls here
 
     // 1. REQUIRED (Parts 1 & 2): A method to store files on the server
-    rpc StoreFile(StoreFileRequest) returns (GenericResponse);
+    rpc StoreFile(stream StoreFileChunk) returns (GenericResponse);
 
     // 2. REQUIRED (Parts 1 & 2): A method to fetch files from the server
     rpc GetFile(GenericRequest) returns (GetFileResponse);
@@ -25,27 +25,16 @@ service DFSService {
 }
 
 // Add your message types here
-
-enum FileStatus {
-    OK = 0;
-    CANCELLED = 1;
-    DEADLINE_EXCEEDED = 4;
-    FILE_NOT_FOUND = 5;
-    ALREADY_EXISTS = 6; 
-    RESOURCE_EXHAUSTED = 8;
-}
-
-message StoreFileRequest {
-    int64 size = 1;     // File size in bytes
-    string name = 2;    // File name
+message StoreFileChunk {
+    string name = 1;    // File name
+    bytes content = 2;  // Chunk of file
 }
 
 message GetFileResponse {
     int64 size = 1;         // File size in bytes
     string name = 2;        // File name
-    FileStatus status = 3;  // Status (grpc::OK, grpc::FILE_NOT_FOUND, etc..)
-    int64 mtime = 4;        // Last modified time
-    bytes content = 5;      // The contents of the file
+    int64 mtime = 3;        // Last modified time
+    bytes content = 4;      // The contents of the file
 }
 
 message GenericRequest {
@@ -55,8 +44,7 @@ message GenericRequest {
 message GenericResponse {
     int64 size = 1;         // File size in bytes
     string name = 2;        // File name
-    FileStatus status = 3;  // Status (grpc::OK, grpc::FILE_NOT_FOUND, etc..)
-    int64 mtime = 4;        // Last modified time
+    int64 mtime = 3;        // Last modified time
 }
 
 message GetAllFilesRequest {

@@ -27,6 +27,10 @@ using grpc::ClientWriter;
 using grpc::ClientReader;
 using grpc::ClientContext;
 
+using dfs_service::StoreFileChunk;
+using dfs_service::GenericRequest;
+using dfs_service::GenericResponse;
+
 //
 // STUDENT INSTRUCTION:
 //
@@ -63,6 +67,81 @@ StatusCode DFSClientNodeP1::Store(const std::string &filename) {
     // StatusCode::NOT_FOUND - if the file cannot be found on the client
     // StatusCode::CANCELLED otherwise
     //
+
+    
+    std::string filepath = WrapPath(filename); // Get source path for the local file
+    std::ifstream file(filepath, std::ios::binary);
+    if (!file.is_open()) {
+        dfs_log(LL_ERROR) << "Failed to open file " << filepath << ". Error: " << strerror(errno);
+        return StatusCode::NOT_FOUND;
+    }
+
+    // NOw that the file is open, send the chunks to the server
+
+    GenericResponse genericResponse;
+    ClientContext context;
+
+    // Setup the gRPC ClientWriter
+    std::unique_ptr<grpc::ClientWriter<dfs_service::StoreFileChunk>> writer(
+        service_stub->StoreFile(&context, &genericResponse));
+    if (!writer) {
+        dfs_log(LL_ERROR) << "Failed to create writer for file " << filepath;
+        return StatusCode::CANCELLED;
+    }
+
+    const int chunkSize = 4096; // 4KB
+    char buffer[chunkSize];
+    bool firstChunk = true;
+
+    // loop through the file reading chunk by chunk and sending it to the server
+    while(!file.eof()) {
+        // read a chunk of the file into the buffer
+        file.read(buffer, chunkSize);
+        std::streamsize bytesRead = file.gcount(); // We won't always read 4 KB (file smaller than 4KB and at end of file)
+        if (bytesRead <= 0) {
+            break; // No more data to read
+        }
+
+        // create and package up the chunk
+        StoreFileChunk chunk;
+        chunk.set_content(buffer, bytesRead);
+        if (firstChunk) {
+            chunk.set_name(filename); // This lets our server know the name of the file
+            firstChunk = false;
+        }
+
+        // send the chunk to the server
+        if (!writer->Write(chunk)) {
+            dfs_log(LL_ERROR) << "Failed to write chunk to server for file " << filepath;
+            return StatusCode::CANCELLED;
+        }
+    }
+
+    writer->WritesDone(); // Indicate that we are done sending chunks
+    Status status = writer->Finish(); // Finish the write operation
+    file.close(); // Close the file)
+
+    if (!status.ok()) {
+        dfs_log(LL_ERROR) << "Failed to finish writing file " << filepath << ". Error: " << status.error_message();
+        
+        if (status.error_code() == StatusCode::DEADLINE_EXCEEDED) {
+            return StatusCode::DEADLINE_EXCEEDED;
+        } else if (status.error_code() == StatusCode::NOT_FOUND) {
+            dfs_log(LL_ERROR) << "File not found on server for file " << filepath;
+            return StatusCode::NOT_FOUND;
+        } else {
+            dfs_log(LL_ERROR) << "Operation cancelled for file " << filepath;
+            return StatusCode::CANCELLED;
+        }
+    }
+    
+    // if (genericResponse.status() != dfs_service::OK) {
+    //     dfs_log(LL_ERROR) << "Failed to store file " << filepath << ". Server response: " << genericResponse.status();
+    //     return StatusCode::CANCELLED;
+    // }
+
+    dfs_log(LL_SYSINFO) << "Successfully stored file " << filepath;
+    return StatusCode::OK; // Successfully stored the file
 }
 
 
