@@ -30,6 +30,9 @@ using grpc::ClientContext;
 using dfs_service::StoreFileChunk;
 using dfs_service::GenericRequest;
 using dfs_service::GenericResponse;
+using dfs_service::GetFileResponse;
+using dfs_service::GetAllFilesRequest;
+using dfs_service::GetAllFilesResponse;
 
 //
 // STUDENT INSTRUCTION:
@@ -47,6 +50,9 @@ using dfs_service::GenericResponse;
 DFSClientNodeP1::DFSClientNodeP1() : DFSClientNode() {}
 
 DFSClientNodeP1::~DFSClientNodeP1() noexcept {}
+
+// Function prototypes
+grpc::StatusCode HandleBadRPCStatus(const grpc::Status &status, const std::string &filepath);
 
 StatusCode DFSClientNodeP1::Store(const std::string &filename) {
 
@@ -77,9 +83,10 @@ StatusCode DFSClientNodeP1::Store(const std::string &filename) {
     }
 
     // NOw that the file is open, send the chunks to the server
+    ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(this->deadline_timeout)); // Add timeout to the context
 
     GenericResponse genericResponse;
-    ClientContext context;
 
     // Setup the gRPC ClientWriter
     std::unique_ptr<grpc::ClientWriter<dfs_service::StoreFileChunk>> writer(
@@ -123,23 +130,14 @@ StatusCode DFSClientNodeP1::Store(const std::string &filename) {
 
     if (!status.ok()) {
         dfs_log(LL_ERROR) << "Failed to finish writing file " << filepath << ". Error: " << status.error_message();
-        
-        if (status.error_code() == StatusCode::DEADLINE_EXCEEDED) {
-            return StatusCode::DEADLINE_EXCEEDED;
-        } else if (status.error_code() == StatusCode::NOT_FOUND) {
-            dfs_log(LL_ERROR) << "File not found on server for file " << filepath;
-            return StatusCode::NOT_FOUND;
-        } else {
-            dfs_log(LL_ERROR) << "Operation cancelled for file " << filepath;
-            return StatusCode::CANCELLED;
+
+        // Let's get rid of the file so we don't leave any corrupted files in the directory
+        if (std::remove(filepath.c_str()) != 0) {
+            dfs_log(LL_ERROR) << "Failed to remove file " << filepath << ". Error: " << strerror(errno);
         }
+        
     }
     
-    // if (genericResponse.status() != dfs_service::OK) {
-    //     dfs_log(LL_ERROR) << "Failed to store file " << filepath << ". Server response: " << genericResponse.status();
-    //     return StatusCode::CANCELLED;
-    // }
-
     dfs_log(LL_SYSINFO) << "Successfully stored file " << filepath;
     return StatusCode::OK; // Successfully stored the file
 }
@@ -166,6 +164,55 @@ StatusCode DFSClientNodeP1::Fetch(const std::string &filename) {
     // StatusCode::CANCELLED otherwise
     //
     //
+
+    ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(this->deadline_timeout)); // Add timeout to the context
+
+    GenericRequest request;
+    request.set_name(filename); // Set the name of the file to fetch
+
+    std::unique_ptr<ClientReader<GetFileResponse>> reader = service_stub->GetFile(&context, request);
+    if (!reader) {
+        dfs_log(LL_ERROR) << "Failed to create reader for file " << filename;
+        return StatusCode::CANCELLED;
+    }
+
+    std::string destPath = WrapPath(filename); // Get the destination path for the file
+    std::ofstream ofs(destPath, std::ios::binary);
+    if (!ofs.is_open()) {
+        dfs_log(LL_ERROR) << "Failed to open file " << destPath << ". Error: " << strerror(errno);
+        return StatusCode::CANCELLED;
+    }
+
+    GetFileResponse response; // This response will receive the stream of data for the file that was requested
+
+    while(reader->Read(&response)) {
+        ofs.write(response.content().data(), response.content().size());
+        if (ofs.bad()) {
+            dfs_log(LL_ERROR) << "Write failed for file " << destPath << ". Error: " << strerror(errno);
+            ofs.close(); // Close the file before returning
+            return StatusCode::CANCELLED;
+        }
+
+        // Fist chunk will send the mtiome and name information in case it needs it
+    }
+
+    // Read the status and check for errors during final transmission
+    Status status = reader->Finish();
+    ofs.close(); // Close the file
+
+    if (!status.ok()) {
+        
+        // Let's get rid of the file so we don't leave any corrupted files in the directory
+        if (std::remove(destPath.c_str()) != 0) {
+            dfs_log(LL_ERROR) << "Failed to remove file " << destPath << ". Error: " << strerror(errno);
+        }
+
+        return HandleBadRPCStatus(status, filename);
+    }
+
+    dfs_log(LL_SYSINFO) << "Successfully fetched file " << filename;
+    return StatusCode::OK; // Successfully fetched the file
 }
 
 StatusCode DFSClientNodeP1::Delete(const std::string& filename) {
@@ -184,6 +231,23 @@ StatusCode DFSClientNodeP1::Delete(const std::string& filename) {
     // StatusCode::CANCELLED otherwise
     //
 
+    ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(this->deadline_timeout)); // Add timeout to the context
+
+    GenericRequest request;
+    request.set_name(filename); // Set the name of the file to delete
+
+    GenericResponse response;
+    
+    Status status = service_stub->DeleteFile(&context, request, &response);
+    if (!status.ok()) {
+        return HandleBadRPCStatus(status, filename);
+    }
+
+
+    dfs_log(LL_SYSINFO) << "Successfully deleted file " << filename;
+    dfs_log(LL_SYSINFO) << "File details: mtime=" << response.mtime() << ", ctime=" << response.ctime() << ", size=" << response.size();
+    return StatusCode::OK; // Successfully deleted the file
 }
 
 StatusCode DFSClientNodeP1::List(std::map<std::string,int>* file_map, bool display) {
@@ -207,6 +271,31 @@ StatusCode DFSClientNodeP1::List(std::map<std::string,int>* file_map, bool displ
     // StatusCode::CANCELLED otherwise
     //
     //
+
+
+    ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(this->deadline_timeout)); // Add timeout to the context
+
+    GetAllFilesRequest request;
+    GetAllFilesResponse response;
+
+    Status status = service_stub->GetAllFiles(&context, request, &response);
+    if (!status.ok()) {
+        return HandleBadRPCStatus(status, "");
+    }
+
+    // loop through results from response and add them to the map
+    // key is the file name and value is the mtime
+    for (const auto& file : response.files()) {
+        std::string name = file.name();
+        int64_t mtime = file.mtime();
+        (*file_map)[name] = static_cast<int>(mtime); // Fill the map with the file name and its mtime
+        if (display) {
+            dfs_log(LL_SYSINFO) << "File: " << name << ", mtime: " << mtime;
+        }
+    }
+
+    return StatusCode::OK;
 }
 
 StatusCode DFSClientNodeP1::Stat(const std::string &filename, void* file_status) {
@@ -233,6 +322,7 @@ StatusCode DFSClientNodeP1::Stat(const std::string &filename, void* file_status)
     // StatusCode::CANCELLED otherwise
     //
     //
+    return Status::OK;
 }
 
 //
@@ -242,4 +332,29 @@ StatusCode DFSClientNodeP1::Stat(const std::string &filename, void* file_status)
 // implementations of your client methods
 //
 
+grpc::StatusCode HandleBadRPCStatus(const grpc::Status &status, const std::string &filepath) {
+    if (status.error_code() == StatusCode::DEADLINE_EXCEEDED) {
+        if (filepath.empty()) {
+            dfs_log(LL_ERROR) << "Deadline exceeded for operation";
+        } else {
+            dfs_log(LL_ERROR) << "Deadline exceeded for file " << filepath;
+        }
+        
+        return StatusCode::DEADLINE_EXCEEDED;
+    } else if (status.error_code() == StatusCode::NOT_FOUND) {
+        if (filepath.empty()) {
+            dfs_log(LL_ERROR) << "A file was not found on server for file";
+        } else {
+            dfs_log(LL_ERROR) << "File not found on server for file " << filepath;
+        }
 
+        return StatusCode::NOT_FOUND;
+    } else {
+        if (filepath.empty()) {
+            dfs_log(LL_ERROR) << "Operation cancelled";
+        } else {
+            dfs_log(LL_ERROR) << "Operation cancelled for file " << filepath;
+        }
+        return StatusCode::CANCELLED;
+    }
+}

@@ -31,7 +31,6 @@ using dfs_service::GetFileResponse;
 using dfs_service::GetAllFilesRequest;
 using dfs_service::GetAllFilesResponse;
 
-
 using dfs_service::DFSService;
 
 
@@ -83,6 +82,48 @@ private:
      */
     const std::string WrapPath(const std::string &filepath) {
         return this->mount_path + filepath;
+    }
+
+    int64_t GetFileMTime(std::string &filePath) {
+        struct stat fStats;
+        if (stat(filePath.c_str(), &fStats) != 0) {
+            return -1;
+        }
+
+        return static_cast<int64_t>(fStats.st_mtime);
+    }
+
+    int64_t GetFileCTime(std::string &filePath) {
+        struct stat fStats;
+        if (stat(filePath.c_str(), &fStats) != 0) {
+            return -1;
+        }
+
+        return static_cast<int64_t>(fStats.st_ctime);
+    }
+
+    /**
+     * This method gets both the modification time and the creation time of a file.
+     * @param filePath a string containing the path to the file
+     * @param mtime a pointer to an int64_t variable to store the modification time
+     * @param ctime a pointer to an int64_t variable to store the creation time
+     * @return true if the operation was successful, false otherwise
+     */
+    bool GetFileTimes(std::string &filePath, int64_t* mtime, int64_t* ctime) {
+        struct stat fStats;
+        if (stat(filePath.c_str(), &fStats) != 0) {
+            return false;
+        }
+
+        if (mtime) {
+            *mtime = static_cast<int64_t>(fStats.st_mtime);
+        }
+        
+        if (ctime) {
+            *ctime = static_cast<int64_t>(fStats.st_ctime);
+        }
+
+        return true;
     }
 
 
@@ -152,23 +193,124 @@ public:
         }
         dfs_log(LL_SYSINFO) << "File written successfully at: " << filePath;
         response->set_name(fileName);
+        
+        int64_t mtime = -1, ctime = -1;
+        if (!GetFileTimes(filePath, &mtime, &ctime)) {
+            dfs_log(LL_ERROR) << "Failed to get file times for file: " << filePath;
+            return Status::OK; // We can still return a success status even if we fail to get the times, this should not be a fatal error
+        }
+
+        response->set_mtime(mtime);
+        response->set_ctime(ctime);
         return Status::OK;
     }
 
-    Status GetFile(ServerContext* context, const GenericRequest* request, GetFileResponse* response) override {
+    Status GetFile(ServerContext* context, const GenericRequest* request, ServerWriter<GetFileResponse>* writer) override {
         std::cout << "Received GetFileRequest" << std::endl;
-        std::string filepath = WrapPath(request->name());
+
+        std::string fileName = request->name();
+        if (fileName.empty()) {
+            dfs_log(LL_ERROR) << "Received empty file name";
+            return Status(StatusCode::CANCELLED, "Received empty file name");
+        }
+
+        dfs_log(LL_SYSINFO) << "FileName: " << fileName;
+        std::string filePath = WrapPath(fileName);
+        
+        {
+            std::lock_guard<std::mutex> lock(file_mtx); // take the mutex to protect the file access
+            std::ifstream ifs(filePath, std::ios::binary);
+
+            // Check if the file exists
+            if (!ifs.is_open()) {
+                dfs_log(LL_ERROR) << "File not found: " << filePath;
+                return Status(StatusCode::NOT_FOUND, "File not found");
+            }
+            dfs_log(LL_SYSINFO) << "File found: " << filePath;
+            
+            StreamFileToClient(ifs, filePath, fileName, writer);
+        } // release the mutex
+
+        dfs_log(LL_SYSINFO) << "File sent successfully to client: " << filePath;
         return Status::OK;
     }
 
     Status DeleteFile(ServerContext* context, const GenericRequest* request, GenericResponse* response) override {
         std::cout << "Received DeleteFileRequest" << std::endl;
-        std::string filepath = WrapPath(request->name());
+        std::string fileName = request->name();
+        response->set_name(fileName);
+        if (fileName.empty()) {
+            dfs_log(LL_ERROR) << "Received empty file name";
+            return Status(StatusCode::CANCELLED, "Received empty file name");
+        }
+
+        std::string filePath = WrapPath(fileName);
+
+        {
+            std::lock_guard<std::mutex> lock(file_mtx); // take the mutex to protect the file access
+
+            static struct stat fStats;
+            if (stat(filePath.c_str(), &fStats) != 0) {
+                dfs_log(LL_ERROR) << "File not found: " << filePath;
+                return Status(StatusCode::NOT_FOUND, "File not found");
+            }
+
+            response->set_mtime(static_cast<int64_t>(fStats.st_mtime));
+            response->set_ctime(static_cast<int64_t>(fStats.st_ctime));
+            response->set_size(static_cast<int64_t>(fStats.st_size));
+            
+            if (remove(filePath.c_str()) != 0) {
+                dfs_log(LL_ERROR) << "Failed to delete file: " << filePath << ". Error: " << strerror(errno);
+                return Status(StatusCode::CANCELLED, "Failed to delete file");
+            }
+        } // release the mutex
+
+        dfs_log(LL_SYSINFO) << "File deleted successfully: " << filePath;
         return Status::OK;
     }
 
     Status GetAllFiles(ServerContext* context, const GetAllFilesRequest* request, GetAllFilesResponse* response) override {
         std::cout << "Received GetAllFilesRequest" << std::endl;
+
+        {
+            std::lock_guard<std::mutex> lock(file_mtx); // take the mutex to protect the file access
+            // 1. Open directory containing the files
+            std::string mntPath = this->mount_path;
+
+            // Used some code from this reference: https://www.cppstories.com/2019/04/dir-iterate/ to learn how to iterate through a directory
+            DIR* dir = nullptr;
+            dir = opendir(mntPath.c_str());
+            if (dir == nullptr) {
+                dfs_log(LL_ERROR) << "Failed to open directory: " << mntPath;
+                return Status(StatusCode::CANCELLED, "Failed to open directory");
+            }
+
+            struct dirent* entry = nullptr;
+            while((entry = readdir(dir)) != nullptr) {
+                if (entry->d_type != DT_REG) {
+                    // basically we can skip everything that isn't a file
+                    continue;
+                }
+
+                // 2. Read directory entiries and create a GenericResponse object adding to the list of files
+                GenericResponse* entryResponse = response->add_files(); 
+                entryResponse->set_name(entry->d_name); // Set the name of the file
+                std::string filePath = WrapPath(entry->d_name);
+                
+                // 3. Populate that GenericResponse object with the file name, mtime, ctime, and size
+                struct stat fStats;
+                if (stat(filePath.c_str(), &fStats) != 0) {
+                    dfs_log(LL_ERROR) << "Failed to get file status for file: " << filePath;
+                    continue; // Skip this file if we can't get its status
+                }
+                entryResponse->set_mtime(static_cast<int64_t>(fStats.st_mtime)); // Set the mtime of the file
+                entryResponse->set_ctime(static_cast<int64_t>(fStats.st_ctime)); // Set the ctime of the file
+                entryResponse->set_size(static_cast<int64_t>(fStats.st_size)); // Set the size of the file
+            }
+            closedir(dir); // Close the directory
+        } // release the mutex
+        
+        dfs_log(LL_SYSINFO) << "All files sent successfully";
         return Status::OK;
     }
 
@@ -177,7 +319,6 @@ public:
         std::string filepath = WrapPath(request->name());
         return Status::OK;
     }
-
 
 };
 
@@ -224,3 +365,43 @@ void DFSServerNode::Start() {
 //
 // Add your additional DFSServerNode definitions here
 //
+
+
+Status StreamFileToClient(std::ifstream &ifs, const std::string &filePath, std::string &fileName, ServerWriter<GetFileResponse> *writer) {
+    GetFileResponse response;
+    const int chunkSize = 4096; // 4KB
+    char buff[chunkSize];
+    
+    // We can start reading the file from disk, sending it to the client
+    bool firstChunk = true;
+    while (!ifs.eof()) {
+        ifs.read(buff, chunkSize);
+        std::streamsize bytesRead = ifs.gcount(); // If chunk(or file) is smaller than 4KB, this will ensure we don't read more than we have
+
+        if (ifs.bad()) {
+            dfs_log(LL_ERROR) << "Failed to read from file: " << filePath << ". Error: " << strerror(errno);
+            return Status(StatusCode::CANCELLED, "Failed to read from file");
+        }
+
+        if (bytesRead <= 0) {
+            break; // No more data to read
+        }
+
+        GetFileResponse chunk;
+        if (firstChunk) {
+            // We only want to send the mtime and name on the first chunk
+            chunk.set_name(fileName);
+            chunk.set_mtime(GetFileMTime(filePath)); 
+            firstChunk = false;
+        }
+
+        chunk.set_content(buff, bytesRead); // Set the content of the chunk
+        
+        if (!writer->Write(chunk)) {
+            dfs_log(LL_ERROR) << "Failed to write chunk to client for file " << fileName;
+            return Status(StatusCode::CANCELLED, "Failed to write chunk to client");
+        }
+        dfs_log(LL_DEBUG) << "Sending chunk of size: " << bytesRead << " to client for file: " << filePath;
+    }
+    return Status::OK;
+}
