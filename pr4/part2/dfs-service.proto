@@ -15,6 +15,9 @@ service DFSService {
     // 4. REQUIRED (Parts 1 & 2): A method to get the status of a file on the server
 
     // 5. REQUIRED (Part 2 only): A method to request a write lock from the server
+    rpc AcquireWriteLock(LockRequest) returns (LockResponse);
+
+    rpc ReleaseWriteLock(LockRequest) returns (LockResponse);
 
     // 6. REQUIRED (Part 2 only): A method named CallbackList to handle asynchronous file listing requests
     //                            from a client. This method should return a listing of files along with their
@@ -29,4 +32,18 @@ service DFSService {
 }
 
 // Add your message types here
+
+
+message LockRequest {
+    string fileName = 1;
+    string clientId = 2;        // The UUID of the client
+}
+
+message LockResponse {
+    bool success = 1;           // True if the lock operation(acquired/release the lock) was successful
+    string message = 2;         // Could be useful to communicate a message with client possibly for logging purposes
+    string currentHolder = 3;   // The UUID of the client currently holding the lock for logging and debugging
+}
+
+
 

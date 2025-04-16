@@ -84,6 +84,12 @@ private:
     /** The vector of queued tags used to manage asynchronous requests **/
     std::vector<QueueRequest<FileRequestType, FileListResponseType>> queued_tags;
 
+    /** The mutex for our fileLocks map **/
+    std::mutex fileLocksMtx;
+
+    /** The fileLocks map that manages the files and their lock states **/
+    std::map<std::string, std::string> fileLocks; 
+
 
     /**
      * Prepend the mount path to the filename.
@@ -217,6 +223,94 @@ public:
     // the implementations of your rpc protocol methods.
     //
 
+    Status AcquireWriteLock(ServerContext* context, const LockRequest *request, LockResponse *response) override {
+        
+        // High level overview of the method:
+        // 1. Acquire mutex for the lock map
+        // 2. If the lock isn't held by another client, then grant it to the current client
+        // 3. If the lock is taken
+        //      a. if the current client is the owner, respond with success as true since we're making it idempotent
+        //      b. else, respond with success as false
+
+        std::lock_guard<std::mutex> lock(fileLocksMtx);
+        
+        // From request, get fileName and clientId references
+        const std::string &fileName = request->filename(); 
+        const std::string &clientId = request->clientid();
+
+        // To check if the file is already locked, we can just fetch the fileName from the map
+        auto mapIter = fileLocks.find(fileName); // get the iterator, if not found then we'll get end()
+        
+        if (mapIter == fileLocks.end()) {
+            // currently not locked, let's lock it and send response
+            fileLocks[fileName] = clientId; // Write to the map that the client has acquired the lock
+            response->set_success(true);
+            response->set_message("Lock acquired");
+            response->set_currentholder(clientId);
+            dfs_log(LL_SYSINFO) << "LOCK acquired! { file: " << fileName << ", clientId: " << clientId << "}";
+            
+            return Status::OK;
+        } 
+
+
+        if (mapIter->second == clientId) {
+            // This means that the current client is the holder of the lock
+            response->set_success(true);
+            response->set_message("You already hold the lock");
+            response->set_currentholder(clientId);
+            dfs_log(LL_SYSINFO) << "LOCK already held by the requesting client! { file: " << fileName << ", clientId: " << clientId << "}";
+            return Status::OK;
+        }
+
+        // if we get here then the lock is help by another client
+        response->set_success(false);
+        response->set_message("Lock is held by another client");
+        response->set_currentholder(mapIter->second);
+        dfs_log(LL_SYSINFO) << "LOCK is held by another client!  { file: " << fileName << ", clientId: " << clientId << "}";
+        return Status::OK;
+    }
+
+    Status ReleaseWriteLock(ServerContext* context, const LockRequest *request, LockResponse *response) override {
+        // High level overview of the method:
+        // 1. Acquire mutex for the lock map
+        // 2. If the file isn't locked then nothing to release and we just return OK status and success as true
+        // 3. If the file is locked
+        //      a. if the current client is the owner, remove it from the map and respond with OK status and success as true
+        //      b. else, respond with OK status and success as false 
+
+        std::lock_guard<std::mutex> lock(fileLockMutex);
+
+        const std::string &fileName = request->filename();
+        const std::string &clientId = request->clientid();
+
+        auto mapIter = fileLocks.find(fileName); // get the iterator, if not found then we'll get end()
+
+        if (mapIter == fileLocks.end()) {
+            // currently not locked, nothing to release
+            response->set_success(true);
+            response->set_message("Lock not held");
+            response->set_currentholder("");
+            dfs_log(LL_SYSINFO) << "LOCK not held! { file: " << fileName << ", clientId: " << clientId << "}";
+            return Status::OK;
+        }
+
+        if (mapIter->second == clientId) {
+            // We can release the lock since the client is the currentHolder
+            fileLocks.erase(mapIter); // remove the lock from the map
+            response->set_success(true);
+            response->set_message("Lock released");
+            response->set_currentholder("");
+            dfs_log(LL_SYSINFO) << "LOCK released! { file: " << fileName << ", clientId: " << clientId << "}";
+            return Status::OK;
+        }
+
+        // If we get here then the lock is held by another client
+        response->set_success(false);
+        response->set_message("Lock is held by another client");
+        response->set_currentholder(mapIter->second);
+        dfs_log(LL_SYSINFO) << "LOCK is held by another client! { file: " << fileName << ", clientId: " << clientId << "}";
+        return Status::OK;
+    }
 
 };
 
