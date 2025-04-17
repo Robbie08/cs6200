@@ -227,7 +227,7 @@ public:
         
         // High level overview of the method:
         // 1. Acquire mutex for the lock map
-        // 2. If the lock isn't held by another client, then grant it to the current client
+        // 2. If the lock isn't held at all, then grant it to the current client
         // 3. If the lock is taken
         //      a. if the current client is the owner, respond with success as true since we're making it idempotent
         //      b. else, respond with success as false
@@ -235,8 +235,26 @@ public:
         std::lock_guard<std::mutex> lock(fileLocksMtx);
         
         // From request, get fileName and clientId references
+
+        // prevent taking a lock on an empty fileName
         const std::string &fileName = request->filename(); 
+        if (fileName.empty()) {
+            response->set_success(false);
+            response->set_message("fileName is empty");
+            response->set_currentholder("");
+            dfs_log(LL_ERROR) << "LOCK request failed because fileName is empty. { file: " << fileName << ", clientId: " << request->clientid() << "}";
+            return Status::CANCELLED;
+        }
+
+        // prevent allowing empty clientId to lock file
         const std::string &clientId = request->clientid();
+        if (clientId.empty()) {
+            response->set_success(false);
+            response->set_message("clientId is empty");
+            response->set_currentholder("");
+            dfs_log(LL_ERROR) << "LOCK request failed because clientId is empty. { file: " << fileName << ", clientId: " << clientId << "}";
+            return Status::CANCELLED;
+        }
 
         // To check if the file is already locked, we can just fetch the fileName from the map
         auto mapIter = fileLocks.find(fileName); // get the iterator, if not found then we'll get end()
@@ -252,7 +270,6 @@ public:
             return Status::OK;
         } 
 
-
         if (mapIter->second == clientId) {
             // This means that the current client is the holder of the lock
             response->set_success(true);
@@ -262,12 +279,12 @@ public:
             return Status::OK;
         }
 
-        // if we get here then the lock is help by another client
+        // if we get here then the lock is held by another client
         response->set_success(false);
         response->set_message("Lock is held by another client");
         response->set_currentholder(mapIter->second);
         dfs_log(LL_SYSINFO) << "LOCK is held by another client!  { file: " << fileName << ", clientId: " << clientId << "}";
-        return Status::OK;
+        return Status::RESOURCE_EXHAUSTED;
     }
 
     Status ReleaseWriteLock(ServerContext* context, const LockRequest *request, LockResponse *response) override {
@@ -280,8 +297,26 @@ public:
 
         std::lock_guard<std::mutex> lock(fileLockMutex);
 
-        const std::string &fileName = request->filename();
+        // prevent releasing a lock on an empty fileName
+        const std::string &fileName = request->filename(); 
+        if (fileName.empty()) {
+            response->set_success(false);
+            response->set_message("fileName is empty");
+            response->set_currentholder("");
+            dfs_log(LL_ERROR) << "LOCK request failed because fileName is empty. { file: " << fileName << ", clientId: " << request->clientid() << "}";
+            return Status::CANCELLED;
+        }
+
+        // fail fast in case of empty clientId
         const std::string &clientId = request->clientid();
+        if (clientId.empty()) {
+            response->set_success(false);
+            response->set_message("clientId is empty");
+            response->set_currentholder("");
+            dfs_log(LL_ERROR) << "LOCK request failed because clientId is empty. { file: " << fileName << ", clientId: " << clientId << "}";
+            return Status::CANCELLED;
+        }
+
 
         auto mapIter = fileLocks.find(fileName); // get the iterator, if not found then we'll get end()
 
@@ -309,7 +344,7 @@ public:
         response->set_message("Lock is held by another client");
         response->set_currentholder(mapIter->second);
         dfs_log(LL_SYSINFO) << "LOCK is held by another client! { file: " << fileName << ", clientId: " << clientId << "}";
-        return Status::OK;
+        return Status::RESOURCE_EXHAUSTED;
     }
 
 };

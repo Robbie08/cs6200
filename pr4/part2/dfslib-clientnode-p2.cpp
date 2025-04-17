@@ -42,6 +42,8 @@ extern dfs_log_level_e DFS_LOG_LEVEL;
 //
 using FileRequestType = FileRequest;
 using FileListResponseType = FileList;
+using dfs_service::LockRequest;
+using dfs_service::LockResponse;
 
 DFSClientNodeP2::DFSClientNodeP2() : DFSClientNode() {}
 DFSClientNodeP2::~DFSClientNodeP2() {}
@@ -66,6 +68,42 @@ grpc::StatusCode DFSClientNodeP2::RequestWriteAccess(const std::string &filename
     //
     //
 
+    LockResponse response;
+    ClientContext context;
+    LockRequest request;
+
+    request.set_filename(filename);
+    request.set_clientid(this->client_id);
+
+    // Set the deadline for the request
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(this->deadline_timeout)); // Add timeout to the context
+    Status status = service_stub->AcquireWriteLock(&context, request, &response);
+    
+    if (!status.ok()) {
+        // Scenarios are DEADLINE_EXCEEDED, RESOURCE_EXHAUSTED, CANCELLED
+        if (status.error_code() == StatusCode::DEADLINE_EXCEEDED) {
+            // timeout
+            dfs_log(LL_ERROR) << "Deadline exceeded for write lock request";
+            return StatusCode::DEADLINE_EXCEEDED; 
+        } else if (status.error_code() == StatusCode::RESOURCE_EXHAUSTED) {
+            // failed to obtain lock
+            dfs_log(LL_ERROR) << "Failed to obtain write lock for file " << filename << ". Current holder: " << response.currentholder();
+            return StatusCode::RESOURCE_EXHAUSTED;
+        } else {
+            // other errors
+            dfs_log(LL_ERROR) << "Failed to obtain write lock for file " << filename << ". Error: " << response.message();
+            return StatusCode::CANCELLED;
+        }
+    }
+
+    // Let's just peform a sanity check here. Even though status is Ok, let's corroborate with our resposne sturcture
+    if (!response.success()) {
+        dfs_log(LL_ERROR) << "Failed to obtain write lock for file " << filename << ". Error: " << response.message(). << "Current hoklder: " << response.currentholder();
+        return StatusCode::RESOURCE_EXHAUSTED;
+    }
+
+    dfs_log(LL_SYSINFO) << "Successfully obtained write lock for file " << filename << ". Current holder: " << response.currentholder();
+    return StatusCode::OK; // Successfully obtained the write lock
 }
 
 grpc::StatusCode DFSClientNodeP2::Store(const std::string &filename) {
