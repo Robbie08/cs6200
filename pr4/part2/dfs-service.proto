@@ -7,17 +7,19 @@ service DFSService {
     // Add your service calls here
 
     // 1. REQUIRED (Parts 1 & 2): A method to store files on the server
+    rpc StoreFile(stream StoreFileChunk) returns (GenericResponse);
 
     // 2. REQUIRED (Parts 1 & 2): A method to fetch files from the server
+    rpc GetFile(GenericRequest) returns (stream GetFileResponse);
 
     // 3. REQUIRED (Parts 1 & 2): A method to list all files on the server
+    rpc GetAllFiles(GetAllFilesRequest) returns (GetAllFilesResponse);
 
     // 4. REQUIRED (Parts 1 & 2): A method to get the status of a file on the server
+    rpc GetFileStatus(GenericRequest) returns (GenericResponse);
 
     // 5. REQUIRED (Part 2 only): A method to request a write lock from the server
     rpc AcquireWriteLock(LockRequest) returns (LockResponse);
-
-    rpc ReleaseWriteLock(LockRequest) returns (LockResponse);
 
     // 6. REQUIRED (Part 2 only): A method named CallbackList to handle asynchronous file listing requests
     //                            from a client. This method should return a listing of files along with their
@@ -25,6 +27,7 @@ service DFSService {
     //                            size, modified time, and creation time.
 
     // 7. REQUIRED (Part 2 only): A method to delete a file from the server
+    rpc DeleteFile(GenericRequest) returns (GenericResponse);
 
     // 8. Any other methods you deem necessary to complete the tasks of this assignment
 
@@ -32,8 +35,6 @@ service DFSService {
 }
 
 // Add your message types here
-
-
 message LockRequest {
     string fileName = 1;
     string clientId = 2;        // The UUID of the client
@@ -45,5 +46,39 @@ message LockResponse {
     string currentHolder = 3;   // The UUID of the client currently holding the lock for logging and debugging
 }
 
+message GenericRequest {
+    string name = 1;        // File name
+    string clientId = 2;
+}
+
+// This is a generic response type for responses not including file data
+message GenericResponse {
+    string name = 1;        // File name
+    int64 mtime = 2;        // Last modified time
+    int64 ctime = 3;        // Creation Time
+    int64 size = 4;         // File size
+}
+
+// This is a StoreFile request will stream the contents of the file
+message StoreFileChunk {
+    string name = 1;        // File name
+    bytes content = 2;      // Chunk of file
+    string clientId = 3;
+}
+
+// This is a GetFile response that expectst to receieve the stream of file contents
+message GetFileResponse {
+    string name = 1;        // File name
+    bytes content = 2;      // Chunk of file
+    int64 mtime = 3;        // Time of modification
+}
+
+message GetAllFilesRequest {
+    // empty message
+}
+
+message GetAllFilesResponse {
+    repeated GenericResponse files = 1; // List of files
+}
 
 

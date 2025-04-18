@@ -27,6 +27,15 @@ using grpc::ServerWriter;
 using grpc::ServerContext;
 using grpc::ServerBuilder;
 
+using dfs_service::StoreFileChunk;
+using dfs_service::GenericRequest;
+using dfs_service::GenericResponse;
+using dfs_service::GetFileResponse;
+using dfs_service::GetAllFilesRequest;
+using dfs_service::GetAllFilesResponse;
+using dfs_service::LockRequest;
+using dfs_service::LockResponse;
+
 using dfs_service::DFSService;
 
 
@@ -103,6 +112,30 @@ private:
 
     /** CRC Table kept in memory for faster calculations **/
     CRC::Table<std::uint32_t, 32> crc_table;
+
+    /**
+     * This method gets both the modification time and the creation time of a file.
+     * @param filePath a string containing the path to the file
+     * @param mtime a pointer to an int64_t variable to store the modification time
+     * @param ctime a pointer to an int64_t variable to store the creation time
+     * @return true if the operation was successful, false otherwise
+     */
+    bool GetFileTimes(std::string &filePath, int64_t* mtime, int64_t* ctime) {
+        struct stat fStats;
+        if (stat(filePath.c_str(), &fStats) != 0) {
+            return false;
+        }
+
+        if (mtime) {
+            *mtime = static_cast<int64_t>(fStats.st_mtime);
+        }
+        
+        if (ctime) {
+            *ctime = static_cast<int64_t>(fStats.st_ctime);
+        }
+
+        return true;
+    }
 
 public:
 
@@ -223,6 +256,116 @@ public:
     // the implementations of your rpc protocol methods.
     //
 
+    Status StoreFile(ServerContext* context, ServerReader<StoreFileChunk>* reader, GenericResponse* response) override {
+        std::cout << "Received StoreFileRequest" << std::endl;
+
+        StoreFileChunk chunk; // defined in my proto file
+        std::ofstream ofs;    // output file stream
+        std::string filePath; // This will be the full path where the server needs to write the file to
+        std::string fileName; // The name of the file sent by client
+        bool firstChunk = true; // Flag to check if this is the first chunk
+        while (reader->Read(&chunk)) {
+            // We only want to open the file once, when we receive the first chunk
+            // If the fileName is empty, it means we are at the first chunk
+            if (firstChunk) {
+                fileName = chunk.name();
+                if (fileName.empty()) {
+                    dfs_log(LL_ERROR) << "Received empty file name";
+                    return Status(StatusCode::CANCELLED, "Received empty file name");
+                }
+
+                if (!HasFileLock(chunk.name(), chunk.clientid())) {
+                    dfs_log(LL_ERROR) << "LOCK access not granted to the current client. { file: " << chunk.name() << ", clientId: " << chunk.clientid() << "}";
+                    return Status(StatusCode::RESOURCE_EXHAUSTED, "File is already locked by another client");
+                }
+    
+                dfs_log(LL_SYSINFO) << "FileName: " << fileName;
+
+                filePath = WrapPath(fileName); // Get the full path where the server needs to write the file to
+                dfs_log(LL_SYSINFO) << "Destination file path: " << filePath;
+                ofs.open(filePath, std::ios::binary);
+                if (!ofs.is_open()) {
+                    dfs_log(LL_ERROR) << "Failed to open file " << filePath << ". Error: " << strerror(errno);
+                    ReleaseWriteLock(fileName); // Release the lock
+                    return Status(StatusCode::CANCELLED, "Failed to open file for writing");
+                }
+                firstChunk = false; // We can set this to false since we are now processing the first chunk
+            }
+
+            // Write the chunk content to the file
+            ofs.write(chunk.content().data(), chunk.content().size());
+            if (ofs.fail()) {
+                dfs_log(LL_ERROR) << "Failed to write to file " << fileName << ". Error: " << strerror(errno);
+                ofs.close(); // Close the file before returning
+                ReleaseWriteLock(fileName); // Release the lock
+                return Status(StatusCode::CANCELLED, "Failed to write to file");
+            }
+            dfs_log(LL_DEBUG) << "Writing chunk of size: " << chunk.content().size() << " to file: " << filePath;
+        }
+
+        // We can close the file outside the critical section since we're not writing to it anymore
+        // allows for other threads to enter the critical section while we're closing it
+        ofs.close();
+        ReleaseWriteLock(fileName); // Release the lock
+        if (ofs.fail()) {
+            dfs_log(LL_ERROR) << "Failed to write to file: " << fileName;
+            return Status(StatusCode::CANCELLED, "Failed to write to file");
+        }
+
+
+        dfs_log(LL_SYSINFO) << "File written successfully at: " << filePath;
+        response->set_name(fileName);
+        
+        int64_t mtime = -1, ctime = -1;
+        if (!GetFileTimes(filePath, &mtime, &ctime)) {
+            dfs_log(LL_ERROR) << "Failed to get file times for file: " << filePath;
+            return Status::OK; // We can still return a success status even if we fail to get the times, this should not be a fatal error
+        }
+
+        response->set_mtime(mtime);
+        response->set_ctime(ctime);
+        return Status::OK;
+    }
+
+    Status DeleteFile(ServerContext* context, const GenericRequest* request, GenericResponse* response) override {
+        std::cout << "Received DeleteFileRequest" << std::endl;
+        std::string fileName = request->name();
+        response->set_name(fileName);
+        if (fileName.empty()) {
+            dfs_log(LL_ERROR) << "Received empty file name";
+            return Status(StatusCode::CANCELLED, "Received empty file name");
+        }
+
+        if (!HasFileLock(fileName, request->clientid())) {
+            dfs_log(LL_ERROR) << "LOCK access not granted to the current client. { file: " << fileName << ", clientId: " << request->clientid() << "}";
+            return Status(StatusCode::RESOURCE_EXHAUSTED, "File is already locked by another client");
+        }
+        
+        std::string filePath = WrapPath(fileName);
+
+        static struct stat fStats;
+        if (stat(filePath.c_str(), &fStats) != 0) {
+            dfs_log(LL_ERROR) << "File not found: " << filePath;
+            ReleaseWriteLock(fileName);
+            return Status(StatusCode::NOT_FOUND, "File not found");
+        }
+
+        response->set_mtime(static_cast<int64_t>(fStats.st_mtime));
+        response->set_ctime(static_cast<int64_t>(fStats.st_ctime));
+        response->set_size(static_cast<int64_t>(fStats.st_size));
+        
+        if (remove(filePath.c_str()) != 0) {
+            dfs_log(LL_ERROR) << "Failed to delete file: " << filePath << ". Error: " << strerror(errno);
+            ReleaseWriteLock(fileName);
+            return Status(StatusCode::CANCELLED, "Failed to delete file");
+        }
+
+
+        dfs_log(LL_SYSINFO) << "File deleted successfully: " << filePath;
+        ReleaseWriteLock(fileName);
+        return Status::OK;
+    }
+
     Status AcquireWriteLock(ServerContext* context, const LockRequest *request, LockResponse *response) override {
         
         // High level overview of the method:
@@ -287,64 +430,21 @@ public:
         return Status::RESOURCE_EXHAUSTED;
     }
 
-    Status ReleaseWriteLock(ServerContext* context, const LockRequest *request, LockResponse *response) override {
-        // High level overview of the method:
-        // 1. Acquire mutex for the lock map
-        // 2. If the file isn't locked then nothing to release and we just return OK status and success as true
-        // 3. If the file is locked
-        //      a. if the current client is the owner, remove it from the map and respond with OK status and success as true
-        //      b. else, respond with OK status and success as false 
+    void ReleaseWriteLock(const std::string &fileName) {
+        std::lock_guard<std::mutex> lock(fileLocksMtx);
+        fileLocks.erase(fileName); // remove the file from the map
+        dfs_log(LL_SYSINFO) << "LOCK released! { file: " << fileName << "}";
+    }
 
-        std::lock_guard<std::mutex> lock(fileLockMutex);
-
-        // prevent releasing a lock on an empty fileName
-        const std::string &fileName = request->filename(); 
-        if (fileName.empty()) {
-            response->set_success(false);
-            response->set_message("fileName is empty");
-            response->set_currentholder("");
-            dfs_log(LL_ERROR) << "LOCK request failed because fileName is empty. { file: " << fileName << ", clientId: " << request->clientid() << "}";
-            return Status::CANCELLED;
-        }
-
-        // fail fast in case of empty clientId
-        const std::string &clientId = request->clientid();
-        if (clientId.empty()) {
-            response->set_success(false);
-            response->set_message("clientId is empty");
-            response->set_currentholder("");
-            dfs_log(LL_ERROR) << "LOCK request failed because clientId is empty. { file: " << fileName << ", clientId: " << clientId << "}";
-            return Status::CANCELLED;
-        }
-
-
+    bool HasFileLock(const std::string &fileName, const std::string &clientId) {
+        std::lock_guard<std::mutex> lock(fileLocksMtx);
         auto mapIter = fileLocks.find(fileName); // get the iterator, if not found then we'll get end()
-
-        if (mapIter == fileLocks.end()) {
-            // currently not locked, nothing to release
-            response->set_success(true);
-            response->set_message("Lock not held");
-            response->set_currentholder("");
-            dfs_log(LL_SYSINFO) << "LOCK not held! { file: " << fileName << ", clientId: " << clientId << "}";
-            return Status::OK;
+        if (mapIter == fileLocks.end() || mapIter->second != clientId) {
+            // This means that the current client is not the holder of the lock
+            dfs_log(LL_ERROR) << "LOCK access not granted to the current client. { file: " << fileName << ", clientId: " << clientId << "}";
+            return false;
         }
-
-        if (mapIter->second == clientId) {
-            // We can release the lock since the client is the currentHolder
-            fileLocks.erase(mapIter); // remove the lock from the map
-            response->set_success(true);
-            response->set_message("Lock released");
-            response->set_currentholder("");
-            dfs_log(LL_SYSINFO) << "LOCK released! { file: " << fileName << ", clientId: " << clientId << "}";
-            return Status::OK;
-        }
-
-        // If we get here then the lock is held by another client
-        response->set_success(false);
-        response->set_message("Lock is held by another client");
-        response->set_currentholder(mapIter->second);
-        dfs_log(LL_SYSINFO) << "LOCK is held by another client! { file: " << fileName << ", clientId: " << clientId << "}";
-        return Status::RESOURCE_EXHAUSTED;
+        return true;
     }
 
 };
