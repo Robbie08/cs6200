@@ -141,5 +141,19 @@ public:
     //
     // You may add any additional declarations of methods or variables that you need here.
     //
+
+    grpc::StatusCode HandleBadRPCStatus(const grpc::Status &status, const std::string &filepath);
+
+    void init_server_map(const dfs_service::FileList &response, std::unordered_map<std::string, dfs_service::GenericResponse> &server_map);
+
+    void init_local_map(const std::string &mntPath, std::unordered_map<std::string, struct stat> &local_files);
+
+    void compare_server_to_local(const std::unordered_map<std::string, dfs_service::GenericResponse> &server_map, const std::unordered_map<std::string, struct stat> &local_files);
+
+    void compare_local_to_server(const std::unordered_map<std::string, struct stat> &local_files, const std::unordered_map<std::string, dfs_service::GenericResponse> &server_map);
+
+    void process_tombstones(const std::vector<std::string> &tombstones, const std::string &mntPath);
+
+    bool file_exists(const std::string &filePath);
 };
 #endif

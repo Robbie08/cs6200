@@ -31,10 +31,10 @@ using dfs_service::StoreFileChunk;
 using dfs_service::GenericRequest;
 using dfs_service::GenericResponse;
 using dfs_service::GetFileResponse;
-using dfs_service::GetAllFilesRequest;
-using dfs_service::GetAllFilesResponse;
 using dfs_service::LockRequest;
 using dfs_service::LockResponse;
+using dfs_service::FileRequest;
+using dfs_service::FileList;
 
 using dfs_service::DFSService;
 
@@ -100,6 +100,12 @@ private:
     std::map<std::string, std::string> fileLocks; 
 
 
+    std::mutex file_mtx; // mutex for accessing file system
+
+    std::mutex tombstone_mutex;
+    std::vector<std::string> tombstones; // List of tombstones for deleted files
+
+
     /**
      * Prepend the mount path to the filename.
      *
@@ -113,6 +119,24 @@ private:
     /** CRC Table kept in memory for faster calculations **/
     CRC::Table<std::uint32_t, 32> crc_table;
 
+    int64_t GetFileMTime(const std::string &filePath) {
+        struct stat fStats;
+        if (stat(filePath.c_str(), &fStats) != 0) {
+            return -1;
+        }
+
+        return static_cast<int64_t>(fStats.st_mtime);
+    }
+
+    int64_t GetFileCTime(const std::string &filePath) {
+        struct stat fStats;
+        if (stat(filePath.c_str(), &fStats) != 0) {
+            return -1;
+        }
+
+        return static_cast<int64_t>(fStats.st_ctime);
+    }
+
     /**
      * This method gets both the modification time and the creation time of a file.
      * @param filePath a string containing the path to the file
@@ -120,7 +144,7 @@ private:
      * @param ctime a pointer to an int64_t variable to store the creation time
      * @return true if the operation was successful, false otherwise
      */
-    bool GetFileTimes(std::string &filePath, int64_t* mtime, int64_t* ctime) {
+    bool GetFileTimes(const std::string &filePath, int64_t* mtime, int64_t* ctime) {
         struct stat fStats;
         if (stat(filePath.c_str(), &fStats) != 0) {
             return false;
@@ -135,6 +159,62 @@ private:
         }
 
         return true;
+    }
+
+    void ReleaseWriteLock(const std::string &fileName) {
+        std::lock_guard<std::mutex> lock(fileLocksMtx);
+        fileLocks.erase(fileName); // remove the file from the map
+        dfs_log(LL_SYSINFO) << "LOCK released! { file: " << fileName << "}";
+    }
+
+    bool HasFileLock(const std::string &fileName, const std::string &clientId) {
+        std::lock_guard<std::mutex> lock(fileLocksMtx);
+        auto mapIter = fileLocks.find(fileName); // get the iterator, if not found then we'll get end()
+        if (mapIter == fileLocks.end() || mapIter->second != clientId) {
+            // This means that the current client is not the holder of the lock
+            dfs_log(LL_ERROR) << "LOCK access not granted to the current client. { file: " << fileName << ", clientId: " << clientId << "}";
+            return false;
+        }
+        return true;
+    }
+
+    Status StreamFileToClient(std::ifstream &ifs, const std::string &filePath, const std::string &fileName, ServerWriter<GetFileResponse> *writer) {
+        GetFileResponse response;
+        const int chunkSize = 4096; // 4KB
+        char buff[chunkSize];
+        
+        // We can start reading the file from disk, sending it to the client
+        bool firstChunk = true;
+        while (!ifs.eof()) {
+            ifs.read(buff, chunkSize);
+            std::streamsize bytesRead = ifs.gcount(); // If chunk(or file) is smaller than 4KB, this will ensure we don't read more than we have
+    
+            if (ifs.bad()) {
+                dfs_log(LL_ERROR) << "Failed to read from file: " << filePath << ". Error: " << strerror(errno);
+                return Status(StatusCode::CANCELLED, "Failed to read from file");
+            }
+    
+            if (bytesRead <= 0) {
+                break; // No more data to read
+            }
+    
+            GetFileResponse chunk;
+            if (firstChunk) {
+                // We only want to send the mtime and name on the first chunk
+                chunk.set_name(fileName);
+                chunk.set_mtime(GetFileMTime(filePath)); 
+                firstChunk = false;
+            }
+    
+            chunk.set_content(buff, bytesRead); // Set the content of the chunk
+            
+            if (!writer->Write(chunk)) {
+                dfs_log(LL_ERROR) << "Failed to write chunk to client for file " << fileName;
+                return Status(StatusCode::CANCELLED, "Failed to write chunk to client");
+            }
+            dfs_log(LL_DEBUG) << "Sending chunk of size: " << bytesRead << " to client for file: " << filePath;
+        }
+        return Status::OK;
     }
 
 public:
@@ -206,6 +286,60 @@ public:
         // The client should receive a list of files or modifications that represent the changes this service
         // is aware of. The client will then need to make the appropriate calls based on those changes.
         //
+
+        // We need to basically do what we did for Part 1 GetAllFiles which is to get the list of 
+        // files all the files from our mounted directory and their metadata.
+        {
+            dfs_log(LL_SYSINFO) << "Processing Callback: " << request->name();
+            std::lock_guard<std::mutex> lock(file_mtx); // take the mutex to protect the file access
+            // 1. Open directory containing the files
+            std::string mntPath = this->mount_path;
+
+            // Used some code from this reference: https://www.cppstories.com/2019/04/dir-iterate/ to learn how to iterate through a directory
+            DIR* dir = nullptr;
+            dir = opendir(mntPath.c_str());
+            if (dir == nullptr) {
+                dfs_log(LL_ERROR) << "Failed to open directory: " << mntPath;
+                return;
+            }
+
+            struct dirent* entry = nullptr;
+            while((entry = readdir(dir)) != nullptr) {
+                if (entry->d_type != DT_REG) {
+                    // basically we can skip everything that isn't a file
+                    continue;
+                }
+
+                // 2. Read directory entiries and create a GenericResponse object adding to the list of files
+                GenericResponse* entryResponse = response->add_files(); 
+                entryResponse->set_name(entry->d_name); // Set the name of the file
+                std::string filePath = WrapPath(entry->d_name);
+                
+                // 3. Populate that GenericResponse object with the file name, mtime, ctime, and size
+                struct stat fStats;
+                if (stat(filePath.c_str(), &fStats) != 0) {
+                    dfs_log(LL_ERROR) << "Failed to get file status for file: " << filePath;
+                    continue; // Skip this file if we can't get its status
+                }
+                entryResponse->set_mtime(static_cast<int64_t>(fStats.st_mtime)); // Set the mtime of the file
+                entryResponse->set_ctime(static_cast<int64_t>(fStats.st_ctime)); // Set the ctime of the file
+                entryResponse->set_size(static_cast<int64_t>(fStats.st_size)); // Set the size of the file
+            }
+            closedir(dir); // Close the directory
+        } // release the mutex
+
+        // since the heavy lifting is done in the Delete by keeping track of the tombstones
+        // we can just send the list of tombstones to the client
+        {
+            std::lock_guard<std::mutex> tombstone_lock(tombstone_mutex);
+            // for each file int the tombsones we must add it to the response
+            for (const auto &fileName : tombstones) {
+                response->add_tombstones(fileName);
+            }
+            tombstones.clear(); // empty the tombstones list after sending it to the client
+        }
+
+        dfs_log(LL_SYSINFO) << "Processed Callback: " << response->files_size() << "files, " << response->tombstones_size() << " tombstones";
 
     }
 
@@ -360,9 +494,114 @@ public:
             return Status(StatusCode::CANCELLED, "Failed to delete file");
         }
 
+        // We need to update the tombstone list so that our ProcessCallbacks method can send the updates to the clients
+        {
+            std::lock_guard<std::mutex> tombstone_lock(tombstone_mutex);
+            tombstones.push_back(fileName);
+        }
 
         dfs_log(LL_SYSINFO) << "File deleted successfully: " << filePath;
         ReleaseWriteLock(fileName);
+        return Status::OK;
+    }
+
+    Status GetFile(ServerContext* context, const GenericRequest* request, ServerWriter<GetFileResponse>* writer) override {
+        std::cout << "Received GetFileRequest" << std::endl;
+
+        std::string fileName = request->name();
+        if (fileName.empty()) {
+            dfs_log(LL_ERROR) << "Received empty file name";
+            return Status(StatusCode::CANCELLED, "Received empty file name");
+        }
+
+        dfs_log(LL_SYSINFO) << "FileName: " << fileName;
+        std::string filePath = WrapPath(fileName);
+        
+        {
+            std::lock_guard<std::mutex> lock(file_mtx); // take the mutex to protect the file access
+            std::ifstream ifs(filePath, std::ios::binary);
+
+            // Check if the file exists
+            if (!ifs.is_open()) {
+                dfs_log(LL_ERROR) << "File not found: " << filePath;
+                return Status(StatusCode::NOT_FOUND, "File not found");
+            }
+            dfs_log(LL_SYSINFO) << "File found: " << filePath;
+            
+            StreamFileToClient(ifs, filePath, fileName, writer);
+
+            // Just to be safe we can close the file here instead of relying on the destructor
+            // ifs.close();
+            // if (ifs.fail()) {
+            //     dfs_log(LL_ERROR) << "Failed to close file: " << fileName;
+            //     return Status(StatusCode::CANCELLED, "Failed to close file");
+            // }
+        } // release the mutex
+
+        dfs_log(LL_SYSINFO) << "File sent successfully to client: " << filePath;
+        return Status::OK;
+    }
+
+    Status GetFileStatus(ServerContext* context, const GenericRequest* request, GenericResponse* response) override {
+        std::cout << "Received GetFileStatusRequest" << std::endl;
+        std::string filepath = WrapPath(request->name());
+        struct stat fStats;
+        if (stat(filepath.c_str(), &fStats) != 0) {
+            dfs_log(LL_ERROR) << "Failed stat() the file: " << filepath;
+            return Status(StatusCode::NOT_FOUND, "File not found");
+        }
+
+        response->set_name(request->name());
+        response->set_mtime(static_cast<int64_t>(fStats.st_mtime));
+        response->set_ctime(static_cast<int64_t>(fStats.st_ctime));
+        response->set_size(static_cast<int64_t>(fStats.st_size));
+        dfs_log(LL_SYSINFO) << "File status sent successfully: " << filepath;
+        dfs_log(LL_SYSINFO) << "File details: mtime=" << response->mtime() << ", ctime=" << response->ctime() << ", size=" << response->size();
+        return Status::OK;
+    }
+
+    Status ListAllFiles(ServerContext *context, const FileRequest *request, FileList *response) override {
+        std::cout << "Received ListAllFiles Request" << std::endl;
+
+        {
+            std::lock_guard<std::mutex> lock(file_mtx); // take the mutex to protect the file access
+            // 1. Open directory containing the files
+            std::string mntPath = this->mount_path;
+
+            // Used some code from this reference: https://www.cppstories.com/2019/04/dir-iterate/ to learn how to iterate through a directory
+            DIR* dir = nullptr;
+            dir = opendir(mntPath.c_str());
+            if (dir == nullptr) {
+                dfs_log(LL_ERROR) << "Failed to open directory: " << mntPath;
+                return Status(StatusCode::CANCELLED, "Failed to open directory");
+            }
+
+            struct dirent* entry = nullptr;
+            while((entry = readdir(dir)) != nullptr) {
+                if (entry->d_type != DT_REG) {
+                    // basically we can skip everything that isn't a file
+                    continue;
+                }
+
+                // 2. Read directory entiries and create a GenericResponse object adding to the list of files
+                GenericResponse* entryResponse = response->add_files(); 
+                entryResponse->set_name(entry->d_name); // Set the name of the file
+                std::string filePath = WrapPath(entry->d_name);
+                
+                // 3. Populate that GenericResponse object with the file name, mtime, ctime, and size
+                struct stat fStats;
+                if (stat(filePath.c_str(), &fStats) != 0) {
+                    dfs_log(LL_ERROR) << "Failed to get file status for file: " << filePath;
+                    continue; // Skip this file if we can't get its status
+                }
+                entryResponse->set_mtime(static_cast<int64_t>(fStats.st_mtime)); // Set the mtime of the file
+                entryResponse->set_ctime(static_cast<int64_t>(fStats.st_ctime)); // Set the ctime of the file
+                entryResponse->set_size(static_cast<int64_t>(fStats.st_size)); // Set the size of the file
+            }
+            closedir(dir); // Close the directory
+        } // release the mutex
+        
+        dfs_log(LL_SYSINFO) << "All files sent successfully";
         return Status::OK;
     }
 
@@ -427,26 +666,8 @@ public:
         response->set_message("Lock is held by another client");
         response->set_currentholder(mapIter->second);
         dfs_log(LL_SYSINFO) << "LOCK is held by another client!  { file: " << fileName << ", clientId: " << clientId << "}";
-        return Status::RESOURCE_EXHAUSTED;
+        return Status(StatusCode::RESOURCE_EXHAUSTED, "Lock is held by another client");
     }
-
-    void ReleaseWriteLock(const std::string &fileName) {
-        std::lock_guard<std::mutex> lock(fileLocksMtx);
-        fileLocks.erase(fileName); // remove the file from the map
-        dfs_log(LL_SYSINFO) << "LOCK released! { file: " << fileName << "}";
-    }
-
-    bool HasFileLock(const std::string &fileName, const std::string &clientId) {
-        std::lock_guard<std::mutex> lock(fileLocksMtx);
-        auto mapIter = fileLocks.find(fileName); // get the iterator, if not found then we'll get end()
-        if (mapIter == fileLocks.end() || mapIter->second != clientId) {
-            // This means that the current client is not the holder of the lock
-            dfs_log(LL_ERROR) << "LOCK access not granted to the current client. { file: " << fileName << ", clientId: " << clientId << "}";
-            return false;
-        }
-        return true;
-    }
-
 };
 
 //

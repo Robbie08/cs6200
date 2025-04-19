@@ -13,7 +13,7 @@ service DFSService {
     rpc GetFile(GenericRequest) returns (stream GetFileResponse);
 
     // 3. REQUIRED (Parts 1 & 2): A method to list all files on the server
-    rpc GetAllFiles(GetAllFilesRequest) returns (GetAllFilesResponse);
+    rpc ListAllFiles(FileRequest) returns (FileList);
 
     // 4. REQUIRED (Parts 1 & 2): A method to get the status of a file on the server
     rpc GetFileStatus(GenericRequest) returns (GenericResponse);
@@ -25,6 +25,7 @@ service DFSService {
     //                            from a client. This method should return a listing of files along with their
     //                            attribute information. The expected attribute information should include name,
     //                            size, modified time, and creation time.
+    rpc CallbackList(FileRequest) returns (FileList);
 
     // 7. REQUIRED (Part 2 only): A method to delete a file from the server
     rpc DeleteFile(GenericRequest) returns (GenericResponse);
@@ -73,12 +74,14 @@ message GetFileResponse {
     int64 mtime = 3;        // Time of modification
 }
 
-message GetAllFilesRequest {
-    // empty message
+message FileRequest {
+    string client_id = 1;
+    string name = 2;
 }
 
-message GetAllFilesResponse {
-    repeated GenericResponse files = 1; // List of files
+message FileList {
+    repeated GenericResponse files = 1;
+    repeated string tombstones = 2; // deleted file names
 }
 
 
